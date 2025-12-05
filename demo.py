@@ -36,11 +36,14 @@ print(f"Generated Dataset: {len(df)} observations")
 print("---------------------------------------------------")
 
 # 2. Run MatchIt
-model = MatchIt(df, 
-                method='nearest', 
-                replace=False,
-                ratio= 2)
-model.fit("treat ~ age + educ + income + married + nodegree")
+# Use Random Forest with 500 trees
+model = MatchIt(
+    df, 
+    method='nearest', 
+    distance='randomforest', 
+    distance_options={'n_estimators': 500, 'max_depth': 5}
+)
+model.fit("treat ~ age + educ + income")
 
 
 pretty_names = {

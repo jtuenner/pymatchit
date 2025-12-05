@@ -5,7 +5,7 @@ import pandas as pd
 import patsy
 import statsmodels.formula.api as smf
 import statsmodels.api as sm
-from typing import Optional, Union, List, Dict
+from typing import Optional, Union, List, Dict, Any
 
 from .distance import estimate_distance
 from .matchers import BaseMatcher, NearestNeighborMatcher, ExactMatcher, SubclassMatcher, CEMMatcher
@@ -30,9 +30,16 @@ class MatchIt:
         estimand: str = "ATT",
         subclass: int = 6,
         discard: str = "none",
+        exact: Optional[Union[List[str], str]] = None,
         cutpoints: Optional[Dict] = None, 
+        distance_options: Optional[Dict[str, Any]] = None, # <--- NEW
         random_state: Optional[int] = None
     ):
+        """
+        Args:
+            distance_options (dict): Options passed to the distance estimation model 
+                                     (e.g. {'n_estimators': 500} for randomforest).
+        """
         self.data = data.copy()
         self.method = method
         self.distance = distance
@@ -43,10 +50,11 @@ class MatchIt:
         self.estimand = estimand 
         self.subclass = subclass
         self.discard = discard
+        self.exact = exact
         self.cutpoints = cutpoints
+        self.distance_options = distance_options # <--- Store it
         self.random_state = random_state
 
-        # Storage for results
         self.formula = None
         self.propensity_scores = None
         self.distance_measure = None
@@ -54,7 +62,6 @@ class MatchIt:
         self.matched_indices = None 
         self.weights = None
         self._treatment_col = None
-        
         self._mask_kept = None 
 
     def fit(self, formula: str):
@@ -65,23 +72,36 @@ class MatchIt:
         should_estimate_ps = (self.distance != "mahalanobis") or (self.discard != "none")
         
         if should_estimate_ps:
+            # Logic: If we are matching with GLM, or we are just discarding, use GLM.
+            # BUT if the user explicitly requested 'randomforest' etc., we use that!
+            
+            # The 'method' arg to estimate_distance IS 'self.distance' (e.g. 'randomforest')
+            # UNLESS self.distance='mahalanobis', in which case we force 'glm' for the background PS.
+            
+            estimation_method = self.distance
+            if self.distance == "mahalanobis":
+                estimation_method = "glm" 
+            
             ps_scores, ps_dist = estimate_distance(
                 data=self.data,
                 formula=formula,
-                method="glm", 
-                link=self.link
+                method=estimation_method, # Pass the ML method here
+                link=self.link,
+                distance_options=self.distance_options, # Pass options
+                random_state=self.random_state
             )
             self.propensity_scores = ps_scores
             
-            if self.distance == "glm":
-                self.distance_measure = ps_dist
-            else:
+            if self.distance == "mahalanobis":
+                # We calculated PS (via GLM) only for discard/plots, not for matching
                 self.distance_measure = None
+            else:
+                # We use the calculated distance (which might be from RF, GBM, etc.)
+                self.distance_measure = ps_dist
         else:
             self.propensity_scores = None
             self.distance_measure = None 
 
-        # Ensure column is assigned immediately if calculated
         if self.propensity_scores is not None:
             self.data['propensity_score'] = self.propensity_scores
         if self.distance_measure is not None:
@@ -161,6 +181,15 @@ class MatchIt:
             
         if self.data[lhs].isnull().any():
             raise ValueError(f"Treatment variable '{lhs}' contains missing values (NaN). Please drop or impute them.")
+
+        if self.exact is not None:
+            if isinstance(self.exact, str):
+                self.exact = [self.exact]
+            for col in self.exact:
+                if col not in self.data.columns:
+                    raise ValueError(f"Exact match variable '{col}' not found in dataframe.")
+                if self.data[col].isnull().any():
+                    raise ValueError(f"Exact match variable '{col}' contains missing values.")
 
         try:
             patsy.dmatrix(rhs, self.data, NA_action='raise', return_type='dataframe')
@@ -256,16 +285,19 @@ class MatchIt:
             else:
                 active_dist = None
             active_covs = X_data.loc[self._mask_kept]
+            active_exact = self.data.loc[self._mask_kept, self.exact] if self.exact else None
         else:
             active_treat = self.data[self._treatment_col]
             active_dist = self.distance_measure
             active_covs = X_data
+            active_exact = self.data[self.exact] if self.exact else None
 
         matches, sub_weights = matcher.match(
             treatment=active_treat,
             distance_measure=active_dist,
             covariates=active_covs,
-            estimand=self.estimand 
+            estimand=self.estimand,
+            exact=active_exact
         )
         
         self.matched_indices = matches
@@ -331,18 +363,14 @@ class MatchIt:
         if type == "balance":
             summary_stats = self.summary(print_output=False)
             love_plot(summary_stats, threshold=threshold, var_names=var_names, colors=colors)
-            
         elif type == "propensity" or type == "jitter":
             if self.propensity_scores is None:
                 raise ValueError("No propensity scores found (did you use Mahalanobis?). Cannot plot propensity.")
             
-            # --- SAFEGUARD: Ensure column exists before plotting ---
-            # This fixes the seaborn ValueError if the column was somehow dropped or not assigned
             if 'propensity_score' not in self.data.columns:
                  self.data['propensity_score'] = self.propensity_scores
             
             propensity_plot(data=self.data, treatment_col=self._treatment_col, weights=self.weights)
-            
         elif type == "ecdf":
             if variable is None:
                 raise ValueError("You must specify 'variable=' for eCDF plots.")
