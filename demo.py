@@ -36,7 +36,10 @@ print(f"Generated Dataset: {len(df)} observations")
 print("---------------------------------------------------")
 
 # 2. Run MatchIt
-model = MatchIt(df, method='cem', replace=False)
+model = MatchIt(df, 
+                method='nearest', 
+                replace=False,
+                ratio= 2)
 model.fit("treat ~ age + educ + income + married + nodegree")
 
 
@@ -60,4 +63,8 @@ model.plot(type='propensity')
 
 # Check distribution balance for Age
 model.plot(type='ecdf', variable='age')
+
+model.summary()
+
+print(model.matches(format='wide').head())
 

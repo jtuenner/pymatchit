@@ -37,7 +37,6 @@ def covariate_balance(
 ) -> pd.DataFrame:
     """
     Calculates raw stats (Means, Variance Ratios) for the provided data/weights.
-    SMD is calculated separately in create_summary_table.
     """
     if weights is None:
         weights = pd.Series(1.0, index=data.index)
@@ -81,7 +80,7 @@ def create_summary_table(
     covariates: list,
     treatment_col: str,
     weights: pd.Series,
-    estimand: str = "ATT"  # <--- NEW PARAMETER
+    estimand: str = "ATT"
 ) -> pd.DataFrame:
     """
     Generates the full 'summary(out)' table.
@@ -110,17 +109,13 @@ def create_summary_table(
             std_factors[cov] = treated_original[cov].std()
         elif estimand == "ATE":
             # ATE: Standardize by Pooled SD
-            # sqrt((var_t + var_c) / 2)
             var_t = treated_original[cov].var()
             var_c = control_original[cov].var()
             std_factors[cov] = np.sqrt((var_t + var_c) / 2)
         else:
-            # Fallback to ATT
             std_factors[cov] = treated_original[cov].std()
 
     # 4. Compute SMD
-    # SMD = (Mean_T_weighted - Mean_C_weighted) / Original_Std_Dev_Factor
-    
     unmatched_balance['Std. Mean Diff.'] = [
         row['Mean Diff'] / std_factors[idx] if std_factors[idx] > 0 else np.nan
         for idx, row in unmatched_balance.iterrows()
@@ -132,3 +127,48 @@ def create_summary_table(
     ]
 
     return unmatched_balance, matched_balance
+
+def compute_sample_size_table(
+    data: pd.DataFrame, 
+    treatment_col: str, 
+    weights: pd.Series, 
+    mask_kept: Optional[pd.Series] = None
+) -> pd.DataFrame:
+    """
+    Computes the 'Sample Sizes' table (All, Matched, Unmatched, Discarded).
+    """
+    # Initialize counts
+    counts = {
+        'All': {'Control': 0, 'Treated': 0},
+        'Matched': {'Control': 0, 'Treated': 0},
+        'Unmatched': {'Control': 0, 'Treated': 0},
+        'Discarded': {'Control': 0, 'Treated': 0},
+    }
+    
+    treat_mask = (data[treatment_col] == 1)
+    control_mask = (data[treatment_col] == 0)
+    
+    # 1. All
+    counts['All']['Treated'] = treat_mask.sum()
+    counts['All']['Control'] = control_mask.sum()
+    
+    # 2. Discarded (Common Support)
+    if mask_kept is not None:
+        discarded_mask = ~mask_kept
+        counts['Discarded']['Treated'] = (discarded_mask & treat_mask).sum()
+        counts['Discarded']['Control'] = (discarded_mask & control_mask).sum()
+    
+    # 3. Matched (Weights > 0)
+    # Note: 'Matched' counts the number of units used (weight > 0).
+    # For ATE/Subclass, this might be everyone who wasn't discarded.
+    matched_mask = (weights > 0)
+    counts['Matched']['Treated'] = (matched_mask & treat_mask).sum()
+    counts['Matched']['Control'] = (matched_mask & control_mask).sum()
+    
+    # 4. Unmatched
+    # Units that were ELIGIBLE (not discarded) but not selected (weight 0).
+    # Logic: All - Discarded - Matched
+    counts['Unmatched']['Treated'] = counts['All']['Treated'] - counts['Discarded']['Treated'] - counts['Matched']['Treated']
+    counts['Unmatched']['Control'] = counts['All']['Control'] - counts['Discarded']['Control'] - counts['Matched']['Control']
+    
+    return pd.DataFrame(counts).T # Transpose so Rows=All/Matched..., Cols=Control/Treated
