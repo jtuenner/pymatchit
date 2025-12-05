@@ -15,8 +15,6 @@ def compute_weighted_stats(x: np.ndarray, weights: np.ndarray) -> dict:
     weighted_mean = np.average(x, weights=weights)
 
     # Weighted Variance (Reliability weights)
-    # Formula: sum(w * (x - mean)^2) / (sum(w) - 1) 
-    # This mimics R's cov.wt or var() with frequency weights
     numerator = np.sum(weights * (x - weighted_mean)**2)
     denominator = np.sum(weights) - 1
     
@@ -35,25 +33,11 @@ def covariate_balance(
     data: pd.DataFrame, 
     covariates: list, 
     treatment_col: str, 
-    weights: Optional[pd.Series] = None,
-    estimand: str = "ATT"
+    weights: Optional[pd.Series] = None
 ) -> pd.DataFrame:
     """
-    Calculates SMD and Variance Ratio for all covariates.
-    
-    Args:
-        data: The dataset (can be matched or unmatched).
-        covariates: List of column names to check balance for.
-        treatment_col: Name of the treatment column.
-        weights: Vector of weights. If None, assumes all 1.0 (unmatched).
-        estimand: "ATT", "ATE", or "ATC". Determines the denominator for SMD.
-                  Note: The denominator logic usually requires access to the ORIGINAL data.
-                  If 'data' passed here is already the matched subset, we might need 
-                  passed-in standard deviations. 
-                  
-                  *Refined Strategy used here:* This function calculates the stats for the 
-                  *current* data state. The standardization factor should be passed in or 
-                  calculated from a reference.
+    Calculates raw stats (Means, Variance Ratios) for the provided data/weights.
+    SMD is calculated separately in create_summary_table.
     """
     if weights is None:
         weights = pd.Series(1.0, index=data.index)
@@ -87,7 +71,6 @@ def covariate_balance(
             'Means Control': stats_c['mean'],
             'Mean Diff': mean_diff,
             'Var Ratio': var_ratio,
-            # We will fill SMD later because we need the ORIGINAL denominator
         })
         
     return pd.DataFrame(rows).set_index('Covariate')
@@ -98,53 +81,54 @@ def create_summary_table(
     covariates: list,
     treatment_col: str,
     weights: pd.Series,
-    estimand: str = "ATT"
+    estimand: str = "ATT"  # <--- NEW PARAMETER
 ) -> pd.DataFrame:
     """
-    Generates the full 'summary(out)' table seen in R.
+    Generates the full 'summary(out)' table.
     """
     # 1. Calculate Unmatched Balance (All Data, weights=1)
     unmatched_balance = covariate_balance(
-        original_data, covariates, treatment_col, weights=None, estimand=estimand
+        original_data, covariates, treatment_col, weights=None
     )
     
     # 2. Calculate Matched Balance (Matched Data, weights=matched_weights)
-    # We use the FULL original dataframe but with the calculated weights
-    # (Rows with 0 weight are effectively ignored by the math)
-    original_data_with_weights = original_data.copy()
-    
     # Ensure weights align
     weights_aligned = weights.reindex(original_data.index).fillna(0)
     
     matched_balance = covariate_balance(
-        original_data_with_weights, covariates, treatment_col, weights=weights_aligned, estimand=estimand
+        original_data.copy(), covariates, treatment_col, weights=weights_aligned
     )
 
     # 3. Calculate Standardization Factors (from ORIGINAL data)
-    # For ATT: Standard Deviation of the Treated group in the ORIGINAL sample
     std_factors = {}
     treated_original = original_data[original_data[treatment_col] == 1]
+    control_original = original_data[original_data[treatment_col] == 0]
     
     for cov in covariates:
         if estimand == "ATT":
+            # ATT: Standardize by Treated group SD
             std_factors[cov] = treated_original[cov].std()
+        elif estimand == "ATE":
+            # ATE: Standardize by Pooled SD
+            # sqrt((var_t + var_c) / 2)
+            var_t = treated_original[cov].var()
+            var_c = control_original[cov].var()
+            std_factors[cov] = np.sqrt((var_t + var_c) / 2)
         else:
-            # TODO: Implement ATE / ATC logic
+            # Fallback to ATT
             std_factors[cov] = treated_original[cov].std()
 
     # 4. Compute SMD
-    # SMD = (Mean_T_weighted - Mean_C_weighted) / Original_Std_Dev
+    # SMD = (Mean_T_weighted - Mean_C_weighted) / Original_Std_Dev_Factor
     
-    # Add SMD to Unmatched
     unmatched_balance['Std. Mean Diff.'] = [
-        row['Mean Diff'] / std_factors[idx] for idx, row in unmatched_balance.iterrows()
+        row['Mean Diff'] / std_factors[idx] if std_factors[idx] > 0 else np.nan
+        for idx, row in unmatched_balance.iterrows()
     ]
     
-    # Add SMD to Matched
     matched_balance['Std. Mean Diff.'] = [
-        row['Mean Diff'] / std_factors[idx] for idx, row in matched_balance.iterrows()
+        row['Mean Diff'] / std_factors[idx] if std_factors[idx] > 0 else np.nan
+        for idx, row in matched_balance.iterrows()
     ]
 
-    # Return a dictionary or a combined MultiIndex dataframe
-    # For now, let's return just the Matched Balance with the SMD column included
     return unmatched_balance, matched_balance

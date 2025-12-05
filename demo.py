@@ -36,7 +36,7 @@ print(f"Generated Dataset: {len(df)} observations")
 print("---------------------------------------------------")
 
 # 2. Run MatchIt
-model = MatchIt(df, method='exact', replace=False)
+model = MatchIt(df, method='subclass', replace=False)
 model.fit("treat ~ age + educ + income + married + nodegree")
 
 
@@ -54,3 +54,10 @@ model.plot(
     var_names=pretty_names,
     colors=("#E69F00", "#56B4E9") # Example: Colorblind-friendly Palette (Orange/Blue)
 )
+
+# Check Propensity Overlap
+model.plot(type='propensity')
+
+# Check distribution balance for Age
+model.plot(type='ecdf', variable='age')
+
