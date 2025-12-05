@@ -9,6 +9,7 @@ __pycache__/
 env/
 venv/
 ENV/
+pymatchit_venv/
 
 # Distribution / packaging
 build/

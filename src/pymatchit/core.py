@@ -57,6 +57,14 @@ class MatchIt:
         self._treatment_col = None
 
     def fit(self, formula: str):
+        """
+        Estimate propensity scores and perform matching.
+        """
+        # --- HIER EINFÜGEN: ---
+        self.formula = formula 
+        # ----------------------
+
+        # 1. Input Validation & Preprocessing
         self._validate_inputs(formula)
         
         # UPDATE THIS BLOCK:

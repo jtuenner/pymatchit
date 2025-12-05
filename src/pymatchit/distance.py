@@ -1,3 +1,5 @@
+# File: src/pymatchit/distance.py
+
 import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
@@ -35,12 +37,12 @@ def estimate_distance(
     family = sm.families.Binomial()
     
     if link == 'probit':
-        family = sm.families.Binomial(link=sm.families.links.probit())
+        family = sm.families.Binomial(link=sm.families.links.Probit())
     elif link == 'logit' or link == 'linear.logit':
-        family = sm.families.Binomial(link=sm.families.links.logit())
+        # FIXED: Use Logit class instead of deprecated function alias
+        family = sm.families.Binomial(link=sm.families.links.Logit())
 
     # 2. Fit the Model (GLM)
-    # Statsmodels formula API handles the 'treat ~ x1 + x2' parsing automatically.
     try:
         model = smf.glm(formula=formula, data=data, family=family)
         result = model.fit()
@@ -53,16 +55,24 @@ def estimate_distance(
 
     # 4. Calculate the Distance Measure (Linear Predictor)
     # R matches on the linear predictor (X * beta), not the probability.
-    # We can ask statsmodels to predict with linear=True to get the log-odds.
     if link in ['logit', 'linear.logit', 'probit']:
-        # This returns X @ params
-        distance_measure = result.predict(linear=True)
+        # FIXED: Updated API from linear=True to which="linear"
+        # Also ensures we get a numpy array or series, handled below
+        distance_measure = result.predict(which="linear")
     else:
         # Fallback: specific numeric distance or raw scores
         distance_measure = propensity_scores
 
-    # Ensure indices align with the original data
-    propensity_scores.index = data.index
-    distance_measure.index = data.index
+    # 5. Ensure return types are pandas Series with correct Index
+    # This prevents "AttributeError: 'numpy.ndarray' object has no attribute 'index'"
+    if not isinstance(propensity_scores, pd.Series):
+        propensity_scores = pd.Series(propensity_scores, index=data.index)
+    else:
+        propensity_scores.index = data.index
+
+    if not isinstance(distance_measure, pd.Series):
+        distance_measure = pd.Series(distance_measure, index=data.index)
+    else:
+        distance_measure.index = data.index
 
     return propensity_scores, distance_measure
