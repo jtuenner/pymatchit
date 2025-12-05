@@ -46,6 +46,7 @@ class MatchIt:
         self.cutpoints = cutpoints
         self.random_state = random_state
 
+        # Storage for results
         self.formula = None
         self.propensity_scores = None
         self.distance_measure = None
@@ -53,42 +54,50 @@ class MatchIt:
         self.matched_indices = None 
         self.weights = None
         self._treatment_col = None
+        
         self._mask_kept = None 
 
     def fit(self, formula: str):
         self.formula = formula 
         self._validate_inputs(formula)
         
-        if self.distance == "mahalanobis":
-            self.propensity_scores = None
-            self.distance_measure = None 
-            print("Distance 'mahalanobis' selected. Skipping Propensity Score estimation.")
-        else:
-            self.propensity_scores, self.distance_measure = estimate_distance(
+        # 1. Estimate Distance / Propensity Scores
+        should_estimate_ps = (self.distance != "mahalanobis") or (self.discard != "none")
+        
+        if should_estimate_ps:
+            ps_scores, ps_dist = estimate_distance(
                 data=self.data,
                 formula=formula,
-                method=self.distance,
+                method="glm", 
                 link=self.link
             )
+            self.propensity_scores = ps_scores
+            
+            if self.distance == "glm":
+                self.distance_measure = ps_dist
+            else:
+                self.distance_measure = None
+        else:
+            self.propensity_scores = None
+            self.distance_measure = None 
+
+        # Ensure column is assigned immediately if calculated
+        if self.propensity_scores is not None:
             self.data['propensity_score'] = self.propensity_scores
+        if self.distance_measure is not None:
             self.data['distance_measure'] = self.distance_measure
 
+        # 2. Apply Common Support / Discard Logic
         if self.discard != "none" and self.propensity_scores is not None:
              self._apply_discard_logic()
         else:
              self._mask_kept = pd.Series(True, index=self.data.index)
 
+        # 3. Match
         self._match()
         return self
 
     def matches(self, format: str = "long") -> pd.DataFrame:
-        """
-        Returns a DataFrame of matched pairs.
-        
-        Args:
-            format (str): 'long' (default) returns one row per matched pair.
-                          'wide' returns one row per treated unit with columns for each match.
-        """
         if self.matched_indices is None:
             raise ValueError("You must run .fit() before retrieving matches.")
 
@@ -104,7 +113,7 @@ class MatchIt:
                         'treated_index': t_idx,
                         'control_index': c_idx
                     })
-            return pd.DataFrame(rows)
+            df = pd.DataFrame(rows)
             
         elif format == "wide":
             rows = []
@@ -113,10 +122,19 @@ class MatchIt:
                 for i, c_idx in enumerate(c_indices):
                     row[f'control_{i+1}'] = c_idx
                 rows.append(row)
-            return pd.DataFrame(rows)
+            df = pd.DataFrame(rows)
             
         else:
             raise ValueError("Format must be 'long' or 'wide'.")
+
+        for col in df.columns:
+            if "index" in col or "control_" in col:
+                try:
+                    df[col] = df[col].astype("Int64")
+                except:
+                    pass 
+        
+        return df
 
     def _validate_inputs(self, formula: str):
         if not self.data.index.is_unique:
@@ -313,10 +331,18 @@ class MatchIt:
         if type == "balance":
             summary_stats = self.summary(print_output=False)
             love_plot(summary_stats, threshold=threshold, var_names=var_names, colors=colors)
+            
         elif type == "propensity" or type == "jitter":
             if self.propensity_scores is None:
                 raise ValueError("No propensity scores found (did you use Mahalanobis?). Cannot plot propensity.")
+            
+            # --- SAFEGUARD: Ensure column exists before plotting ---
+            # This fixes the seaborn ValueError if the column was somehow dropped or not assigned
+            if 'propensity_score' not in self.data.columns:
+                 self.data['propensity_score'] = self.propensity_scores
+            
             propensity_plot(data=self.data, treatment_col=self._treatment_col, weights=self.weights)
+            
         elif type == "ecdf":
             if variable is None:
                 raise ValueError("You must specify 'variable=' for eCDF plots.")
