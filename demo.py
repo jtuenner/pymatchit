@@ -36,7 +36,7 @@ print(f"Generated Dataset: {len(df)} observations")
 print("---------------------------------------------------")
 
 # 2. Run MatchIt
-model = MatchIt(df, method='nearest', replace=False)
+model = MatchIt(df, method='exact', replace=False)
 model.fit("treat ~ age + educ + income + married + nodegree")
 
 

@@ -1,18 +1,19 @@
 import numpy as np
 import pandas as pd
+import patsy  # <--- NEW IMPORT
 import statsmodels.formula.api as smf
 import statsmodels.api as sm
-from sklearn.neighbors import NearestNeighbors
 from typing import Optional, Union, List, Dict
+
+# Updated imports to use the new BaseMatcher architecture
 from .distance import estimate_distance
-from .matchers import NearestNeighborMatcher
+from .matchers import BaseMatcher, NearestNeighborMatcher, ExactMatcher # Ensure ExactMatcher is imported
 from .diagnostics import create_summary_table
 from .plotting import love_plot
 
 class MatchIt:
     """
     MatchIt: Nonparametric Preprocessing for Parametric Causal Inference.
-    
     A Python port of the R MatchIt package.
     """
 
@@ -29,16 +30,6 @@ class MatchIt:
     ):
         """
         Initialize the MatchIt model configuration.
-
-        Args:
-            data (pd.DataFrame): The input dataset.
-            method (str): Matching method. Currently only 'nearest' is implemented.
-            distance (str): Method to estimate distance measure. Default 'glm' (Propensity Score).
-            link (str): The link function for the distance measure. Default 'logit'.
-            replace (bool): Whether to match with replacement. Default False.
-            caliper (float): The caliper width (in standard deviations of the distance measure).
-            ratio (int): How many control units to match to each treated unit (k:1 matching).
-            random_state (int): Seed for reproducibility.
         """
         self.data = data.copy()
         self.method = method
@@ -50,10 +41,11 @@ class MatchIt:
         self.random_state = random_state
 
         # Storage for results
+        self.formula = None
         self.propensity_scores = None
-        self.distance_measure = None  # The logit of the PS (usually used for matching)
+        self.distance_measure = None
         self.matched_data = None
-        self.matched_indices = None # Dict mapping Treated Index -> [Control Indices]
+        self.matched_indices = None 
         self.weights = None
         self._treatment_col = None
 
@@ -61,15 +53,12 @@ class MatchIt:
         """
         Estimate propensity scores and perform matching.
         """
-        # --- HIER EINFÜGEN: ---
         self.formula = formula 
-        # ----------------------
 
-        # 1. Input Validation & Preprocessing
+        # 1. Input Validation
         self._validate_inputs(formula)
         
-        # UPDATE THIS BLOCK:
-        # Delegate calculation to distance.py
+        # 2. Distance Estimation
         self.propensity_scores, self.distance_measure = estimate_distance(
             data=self.data,
             formula=formula,
@@ -81,12 +70,11 @@ class MatchIt:
         self.data['propensity_score'] = self.propensity_scores
         self.data['distance_measure'] = self.distance_measure
 
+        # 3. Perform Matching
         self._match()
         return self
 
     def _validate_inputs(self, formula: str):
-        # Identify treatment column from formula
-        # We use patsy (via statsmodels) logic: LHS is treatment
         if "~" not in formula:
             raise ValueError("Formula must contain '~' separating treatment and covariates.")
         
@@ -96,37 +84,53 @@ class MatchIt:
         
         self._treatment_col = lhs
         
-        # Ensure binary treatment (0/1)
         unique_vals = self.data[self._treatment_col].unique()
         if not set(unique_vals).issubset({0, 1}):
-            # Basic check - in reality, we might need to map boolean/strings to 0/1
             raise ValueError("Treatment variable must be binary (0 and 1).")
 
-
-    def _match(self):
-        print(f"Performing {self.ratio}:1 {self.method} matching...")
-        
-        # Check for implemented methods
+    def _get_matcher(self) -> BaseMatcher:
+        """
+        Factory method to initialize the correct matcher strategy.
+        """
         if self.method == 'nearest':
-            matcher = NearestNeighborMatcher(
+            return NearestNeighborMatcher(
                 ratio=self.ratio, 
                 replace=self.replace, 
                 caliper=self.caliper,
                 random_state=self.random_state
             )
+        elif self.method == 'exact':
+            return ExactMatcher(
+                ratio=self.ratio,
+                replace=self.replace,
+                random_state=self.random_state
+            )
         else:
             raise NotImplementedError(f"Method {self.method} not supported yet.")
 
-        # Delegate to the matcher
+    def _match(self):
+        print(f"Performing {self.ratio}:1 {self.method} matching...")
+        
+        matcher = self._get_matcher()
+
+        # EXTRACT COVARIATES:
+        rhs_formula = self.formula.split('~')[1]
+        
+        # FIX: Use patsy directly, not sm.patsy
+        X_data = pd.DataFrame(patsy.dmatrix(rhs_formula, self.data, return_type='dataframe'))
+        
+        if 'Intercept' in X_data.columns:
+            X_data = X_data.drop(columns=['Intercept'])
+
+        # Delegate the matching process
         self.matched_indices, self.weights = matcher.match(
             treatment=self.data[self._treatment_col],
-            distance_measure=self.distance_measure
+            distance_measure=self.distance_measure,
+            covariates=X_data 
         )
         
-        # Assign weights to main dataframe
+        # Assign results
         self.data['weights'] = self.weights
-        
-        # Create the 'matched_data' view (subset where weights > 0)
         self.matched_data = self.data[self.data['weights'] > 0].copy()
         
         print(f"Matching complete. {len(self.matched_data)} observations in matched set.")
@@ -135,14 +139,10 @@ class MatchIt:
     def summary(self, print_output: bool = True):
         """
         Computes the balance summary.
-        
-        Returns:
-            dict: A dictionary containing 'unmatched' and 'matched' DataFrames.
         """
         if self.matched_data is None:
             raise ValueError("You must run .fit() before .summary()")
 
-        # Extract Covariates from the formula
         rhs = self.formula.split("~")[1]
         covariates = [x.strip() for x in rhs.split("+")]
         
@@ -160,7 +160,6 @@ class MatchIt:
             print("\nSummary of Balance for Matched Data:")
             print(matched[['Means Treated', 'Means Control', 'Std. Mean Diff.', 'Var Ratio']])
         
-        # Return both so the plotter can use them
         return {'unmatched': unmatched, 'matched': matched}
 
     def plot(self, 
@@ -177,7 +176,6 @@ class MatchIt:
             
         if type == "balance":
             summary_stats = self.summary(print_output=False)
-            # Pass new arguments to the plotting function
             love_plot(summary_stats, threshold=threshold, var_names=var_names, colors=colors)
         else:
             raise NotImplementedError("Only type='balance' is currently implemented.")

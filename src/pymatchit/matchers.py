@@ -4,33 +4,80 @@ import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
 from typing import Dict, List, Optional, Tuple
+from abc import ABC, abstractmethod
 
-class NearestNeighborMatcher:
+class BaseMatcher(ABC):
+    """
+    Abstract Base Class for all matching algorithms.
+    Enforces a consistent interface for the MatchIt core.
+    """
+    
+    def __init__(self, ratio: int = 1, replace: bool = False, random_state: Optional[int] = None):
+        self.ratio = ratio
+        self.replace = replace
+        self.random_state = random_state
+
+    @abstractmethod
+    def match(self, 
+              treatment: pd.Series, 
+              distance_measure: pd.Series, 
+              **kwargs
+              ) -> Tuple[Dict[int, List[int]], pd.Series]:
+        """
+        Execute the matching logic.
+
+        Must return:
+            matches: Dict[Treated_Index, List[Control_Indices]]
+            weights: pd.Series (aligned to original data, containing weights)
+        """
+        pass
+
+    def _build_result(self, matches: Dict[int, List[int]], all_indices: pd.Index) -> Tuple[Dict, pd.Series]:
+        """
+        Shared helper to construct the weights and final dataframe logic.
+        """
+        # Collect all Matched IDs
+        matched_treated = []
+        matched_control = []
+        
+        # Count frequency of controls (for weights in replacement mode)
+        from collections import Counter
+        control_counts = Counter()
+
+        for t, c_list in matches.items():
+            matched_treated.append(t)
+            matched_control.extend(c_list)
+            control_counts.update(c_list)
+
+        # Create Weight Vector (Length of ORIGINAL data)
+        weights = pd.Series(0.0, index=all_indices)
+        
+        # 1. Treated units get weight 1
+        weights.loc[matched_treated] = 1.0
+        
+        # 2. Control units get weight proportional to usage
+        # In standard ATT 1:k matching, control weights are often just their frequency.
+        for c_idx, count in control_counts.items():
+            weights.loc[c_idx] = count 
+        
+        return matches, weights
+
+
+class NearestNeighborMatcher(BaseMatcher):
     """
     Implements Nearest Neighbor matching (Greedy).
     """
 
     def __init__(self, ratio: int = 1, replace: bool = False, caliper: Optional[float] = None, random_state: Optional[int] = None):
-        self.ratio = ratio
-        self.replace = replace
+        super().__init__(ratio=ratio, replace=replace, random_state=random_state)
         self.caliper = caliper
-        self.random_state = random_state
 
     def match(self, 
               treatment: pd.Series, 
-              distance_measure: pd.Series
-              ) -> Tuple[Dict[int, List[int]], pd.DataFrame]:
-        """
-        Performs the matching.
-
-        Args:
-            treatment (pd.Series): Binary treatment vector (0/1).
-            distance_measure (pd.Series): The score to match on (e.g., Logit PS).
-
-        Returns:
-            matches (Dict): Mapping of Treated_Index -> List of Control_Indices.
-            matched_data (pd.DataFrame): The resulting subset of data with weights.
-        """
+              distance_measure: pd.Series,
+              **kwargs
+              ) -> Tuple[Dict[int, List[int]], pd.Series]:
+        
         # 1. Split Data
         treated_mask = treatment == 1
         control_mask = treatment == 0
@@ -57,13 +104,13 @@ class NearestNeighborMatcher:
             matches = self._match_without_replacement(X_treated, X_control, treated_indices, control_indices, threshold)
 
         # 3. Construct Matched DataFrame & Weights
-        return self._build_result(matches, treatment.index, treatment.index[control_mask])
+        # Pass the full index from the treatment series to build the full weight vector
+        return self._build_result(matches, treatment.index)
 
     def _match_with_replacement(self, X_treated, X_control, treated_indices, control_indices, threshold):
         """
         Fast vectorized matching using K-Nearest Neighbors.
         """
-        # algorithm='auto' is efficient (KDTree/BallTree)
         nn = NearestNeighbors(n_neighbors=self.ratio, metric='euclidean', algorithm='auto')
         nn.fit(X_control)
 
@@ -72,7 +119,6 @@ class NearestNeighborMatcher:
 
         matches = {}
         for i, t_idx in enumerate(treated_indices):
-            # Check caliper
             valid_neighbors = []
             for j in range(self.ratio):
                 dist = dists[i, j]
@@ -89,27 +135,15 @@ class NearestNeighborMatcher:
     def _match_without_replacement(self, X_treated, X_control, treated_indices, control_indices, threshold):
         """
         Greedy matching loop. 
-        R default: Sorts treated units by descending order of propensity score (usually),
-        then matches 1-by-1.
         """
-        # 1. Sort Treated Units (Descending order of Distance Measure helps greedy matching)
-        # This reduces the chance of "stealing" a good match from a hard-to-match unit.
+        # Sort Treated Units (Descending order of Distance Measure helps greedy matching)
         sort_order = np.argsort(X_treated.flatten())[::-1]
         
-        # Set of available control indices (internal 0..N indices)
         available_control = set(range(len(X_control)))
         
-        # We need a quick lookup for controls. 
-        # For small data, KDTree is fine, but we need to "delete" nodes. 
-        # Simplest Greedy approach: Compute distances on the fly or use a mask.
-        # For efficiency in Python, we can pre-calculate the KDTree, query *more* than k neighbors,
-        # and pick the first one that is available.
-        
+        # Pre-fetch neighbors for efficiency
         nn = NearestNeighbors(n_neighbors=min(len(X_control), self.ratio * 10 + 20), metric='euclidean')
         nn.fit(X_control)
-        
-        # Query ALL potential matches for ALL treated units first (vectorized)
-        # This is faster than re-querying inside the loop.
         all_dists, all_neighbors = nn.kneighbors(X_treated)
 
         matches = {}
@@ -119,7 +153,6 @@ class NearestNeighborMatcher:
             needed = self.ratio
             found = []
 
-            # Look through the pre-fetched neighbors
             possible_neighbors = all_neighbors[i]
             possible_dists = all_dists[i]
 
@@ -127,63 +160,67 @@ class NearestNeighborMatcher:
                 if len(found) >= needed:
                     break
                 
-                # Check constraints
                 if dist > threshold:
                     continue # Caliper violation
                 
                 if c_internal_idx in available_control:
-                    # Match found!
                     found.append(control_indices[c_internal_idx])
                     available_control.remove(c_internal_idx)
             
             if len(found) == needed:
                 matches[t_idx] = found
-            elif len(found) > 0 and len(found) < needed:
-                # Partial matches are usually discarded in 1:k exact matching
-                # depending on policy. R's matchit usually requires full k matches 
-                # or drops the unit if ratio is fixed. 
-                # We will keep partials for now or drop? Let's keep for robustness.
+            elif len(found) > 0:
+                # Keep partial matches
                 matches[t_idx] = found
 
         return matches
+    
+class ExactMatcher(BaseMatcher):
+    """
+    Implements Exact Matching.
+    Units are matched only if they have identical covariate values.
+    """
 
-    def _build_result(self, matches, all_indices, control_pool_indices):
-        """
-        Constructs the weights and final dataframe.
-        """
-        # Collect all Matched IDs
-        matched_treated = []
-        matched_control = []
+    def match(self, 
+              treatment: pd.Series, 
+              covariates: pd.DataFrame, 
+              **kwargs
+              ) -> Tuple[Dict[int, List[int]], pd.Series]:
         
-        # Count frequency of controls (for weights in replacement mode)
-        from collections import Counter
-        control_counts = Counter()
+        # 1. Combine Treatment and Covariates temporarily
+        work_data = covariates.copy()
+        work_data['__treat__'] = treatment.values
+        work_data['__original_index__'] = treatment.index
 
-        for t, c_list in matches.items():
-            matched_treated.append(t)
-            matched_control.extend(c_list)
-            control_counts.update(c_list)
+        # 2. Group by all covariates
+        # We drop the temp columns from the grouping keys
+        group_cols = list(covariates.columns)
+        grouped = work_data.groupby(group_cols)
 
-        # Unique IDs for the dataframe
-        final_ids = list(set(matched_treated + matched_control))
+        matches = {}
         
-        # Create Weight Vector (Length of ORIGINAL data)
-        weights = pd.Series(0.0, index=all_indices)
+        # 3. Iterate through strata
+        for _, group in grouped:
+            treated_in_group = group[group['__treat__'] == 1]
+            control_in_group = group[group['__treat__'] == 0]
+
+            # We need at least 1 treated and 1 control to match
+            if not treated_in_group.empty and not control_in_group.empty:
+                t_indices = treated_in_group['__original_index__'].tolist()
+                c_indices = control_in_group['__original_index__'].tolist()
+                
+                # Link every Treated unit to ALL Control units in this exact stratum
+                for t_idx in t_indices:
+                    matches[t_idx] = c_indices
+
+        # 4. Build Results
+        # For Exact Matching, weights are slightly different than NN.
+        # Treated = 1
+        # Control = (Total Treated in Stratum) / (Total Control in Stratum)
+        # However, our _build_result helper calculates weights based on usage count.
+        # In Exact matching (all-to-all in stratum), a control is used by EVERY treated unit.
+        # So frequency = N_treated. 
+        # If we use the standard helper, Control Weight = N_treated.
+        # This preserves the ATT estimand correctly (sum of weights = N_treated).
         
-        # 1. Treated units get weight 1
-        weights.loc[matched_treated] = 1.0
-        
-        # 2. Control units get weight proportional to usage
-        for c_idx, count in control_counts.items():
-            weights.loc[c_idx] = count  # Basic weight = frequency
-            
-            # Note: In 1:k matching, weights might need normalization 
-            # (e.g., 1/k) depending on the estimand (ATT vs ATE).
-            # For ATT (MatchIt default), weights are usually 1 for treated 
-            # and (frequency) for control to represent the treated population.
-        
-        # Construct result table
-        # We return the indices of rows that have weight > 0
-        active_indices = weights[weights > 0].index
-        
-        return matches, weights
+        return self._build_result(matches, treatment.index)
