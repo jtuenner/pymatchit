@@ -36,7 +36,7 @@ print(f"Generated Dataset: {len(df)} observations")
 print("---------------------------------------------------")
 
 # 2. Run MatchIt
-model = MatchIt(df, method='subclass', replace=False)
+model = MatchIt(df, method='cem', replace=False)
 model.fit("treat ~ age + educ + income + married + nodegree")
 
 

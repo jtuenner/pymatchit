@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
 from scipy.linalg import pinv
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 from abc import ABC, abstractmethod
 
 class BaseMatcher(ABC):
@@ -22,7 +22,7 @@ class BaseMatcher(ABC):
               treatment: pd.Series, 
               distance_measure: Optional[pd.Series] = None, 
               covariates: Optional[pd.DataFrame] = None,
-              estimand: str = "ATT", # <--- NEW PARAMETER
+              estimand: str = "ATT", 
               **kwargs
               ) -> Tuple[Dict[int, List[int]], pd.Series]:
         """
@@ -77,8 +77,6 @@ class NearestNeighborMatcher(BaseMatcher):
         
         if estimand == "ATE":
             # Warning: Basic NN matching is asymmetric and typically estimates ATT.
-            # Usually ATE requires full matching or matching both ways. 
-            # We proceed but this is effectively ATT logic applied to the requested estimand.
             pass
 
         treated_mask = treatment == 1
@@ -227,11 +225,7 @@ class SubclassMatcher(BaseMatcher):
         if distance_measure is None:
             raise ValueError("Propensity Scores (distance_measure) required for Subclassification.")
 
-        # 1. Identify Cutoffs
-        # For ATT: Quantiles of Treated
-        # For ATE: Quantiles of Total Population (usually) or Treated (often used as approximation)
-        # R's MatchIt uses quantiles of the distance measure of the *treated* units by default for both, 
-        # unless 'sub.by' is changed. We stick to treated quantiles for consistency.
+        # 1. Identify Cutoffs (Quantiles of Treated)
         treated_scores = distance_measure[treatment == 1]
         
         _, bins = pd.qcut(treated_scores, q=self.n_subclasses, retbins=True, duplicates='drop')
@@ -263,9 +257,109 @@ class SubclassMatcher(BaseMatcher):
             
             elif estimand == "ATE":
                 # Weight units to represent the full bin size
-                # Treated = N_total / N_treated
-                # Control = N_total / N_control
                 weights.loc[(treatment == 1) & in_bin] = n_total_bin / n_treated
                 weights.loc[(treatment == 0) & in_bin] = n_total_bin / n_control
 
         return {}, weights
+
+
+class CEMMatcher(BaseMatcher):
+    """
+    Implements Coarsened Exact Matching (CEM).
+    1. Coarsens (bins) continuous covariates.
+    2. Performs Exact Matching on the coarsened data.
+    """
+    def __init__(self, cutpoints: Optional[Dict[str, Union[int, List[float]]]] = None, **kwargs):
+        """
+        Args:
+            cutpoints: Dict mapping column names to number of bins (int) or list of cutpoints.
+                       Example: {'age': 10, 'income': [0, 50000, 100000]}
+                       If None, defaults to automatic binning (e.g., 5 bins).
+        """
+        super().__init__(**kwargs)
+        self.cutpoints = cutpoints
+
+    def match(self, 
+              treatment: pd.Series, 
+              covariates: pd.DataFrame, 
+              estimand: str = "ATT",
+              **kwargs
+              ) -> Tuple[Dict[int, List[int]], pd.Series]:
+        
+        if covariates is None:
+            raise ValueError("Covariates required for CEM.")
+
+        # 1. Coarsen the Data
+        # We work on a copy to avoid modifying the original dataframe passed in
+        coarsened = covariates.copy()
+        
+        # Detect numeric columns for binning
+        numeric_cols = coarsened.select_dtypes(include=[np.number]).columns
+        
+        for col in numeric_cols:
+            # Skip binary/dummy variables (0/1) - no need to bin if low cardinality
+            if coarsened[col].nunique() <= 2:
+                continue
+                
+            # Determine how to cut
+            if self.cutpoints and col in self.cutpoints:
+                cuts = self.cutpoints[col]
+            else:
+                # Default heuristic: 5 bins
+                cuts = 5 
+            
+            # Apply binning
+            # We convert to labels=False (integers) which act as categorical codes
+            try:
+                coarsened[col] = pd.cut(coarsened[col], bins=cuts, labels=False, include_lowest=True)
+            except ValueError:
+                # Fallback if cut fails (e.g. constant value)
+                pass
+
+        # 2. Perform Exact Matching on Coarsened Data
+        # Logic largely mirrors ExactMatcher but calculates CEM-specific weights
+        
+        work_data = coarsened.copy()
+        work_data['__treat__'] = treatment.values
+        work_data['__original_index__'] = treatment.index
+        
+        # Group by ALL covariates (which are now bins/categories)
+        grouped = work_data.groupby(list(coarsened.columns))
+        
+        matches = {}
+        weights = pd.Series(0.0, index=treatment.index)
+        
+        for _, group in grouped:
+            treated_in_group = group[group['__treat__'] == 1]
+            control_in_group = group[group['__treat__'] == 0]
+            
+            n_treat = len(treated_in_group)
+            n_control = len(control_in_group)
+            
+            # We need both groups to form a match
+            if n_treat > 0 and n_control > 0:
+                t_indices = treated_in_group['__original_index__'].tolist()
+                c_indices = control_in_group['__original_index__'].tolist()
+                
+                # Register matches (All-to-All in stratum)
+                for t_idx in t_indices:
+                    matches[t_idx] = c_indices
+                
+                # CEM Weights
+                # For ATT:
+                #   W_treated = 1
+                #   W_control = (N_treat_stratum / N_control_stratum)
+                #   (Note: We use the simplified stratum-scaling which balances the weighted counts)
+                
+                if estimand == "ATT":
+                    weights.loc[treated_in_group['__original_index__']] = 1.0
+                    w_c = n_treat / n_control
+                    weights.loc[control_in_group['__original_index__']] = w_c
+                    
+                elif estimand == "ATE":
+                     # ATE: Weight up to total bin size
+                     n_total = n_treat + n_control
+                     weights.loc[treated_in_group['__original_index__']] = n_total / n_treat
+                     weights.loc[control_in_group['__original_index__']] = n_total / n_control
+
+        return matches, weights
