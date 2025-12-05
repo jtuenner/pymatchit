@@ -7,6 +7,7 @@ from typing import Optional, Union, List, Dict
 from .distance import estimate_distance
 from .matchers import NearestNeighborMatcher
 from .diagnostics import create_summary_table
+from .plotting import love_plot
 
 class MatchIt:
     """
@@ -131,23 +132,20 @@ class MatchIt:
         print(f"Matching complete. {len(self.matched_data)} observations in matched set.")
     
 
-    def summary(self):
+    def summary(self, print_output: bool = True):
         """
-        Computes and prints the balance summary.
+        Computes the balance summary.
+        
+        Returns:
+            dict: A dictionary containing 'unmatched' and 'matched' DataFrames.
         """
         if self.matched_data is None:
             raise ValueError("You must run .fit() before .summary()")
 
         # Extract Covariates from the formula
-        # A rough extraction: get all columns used in formula minus the Treatment
-        # (For a real production app, inspect the design matrix from patsy)
-        
-        # Simple heuristic for Tracer Bullet:
-        # If formula is "treat ~ age + educ", split by "+"
         rhs = self.formula.split("~")[1]
         covariates = [x.strip() for x in rhs.split("+")]
         
-        print("\nSummary of Balance for All Data:")
         unmatched, matched = create_summary_table(
             original_data=self.data,
             matched_data=self.matched_data,
@@ -155,9 +153,31 @@ class MatchIt:
             treatment_col=self._treatment_col,
             weights=self.weights
         )
-        print(unmatched[['Means Treated', 'Means Control', 'Std. Mean Diff.', 'Var Ratio']])
 
-        print("\nSummary of Balance for Matched Data:")
-        print(matched[['Means Treated', 'Means Control', 'Std. Mean Diff.', 'Var Ratio']])
+        if print_output:
+            print("\nSummary of Balance for All Data:")
+            print(unmatched[['Means Treated', 'Means Control', 'Std. Mean Diff.', 'Var Ratio']])
+            print("\nSummary of Balance for Matched Data:")
+            print(matched[['Means Treated', 'Means Control', 'Std. Mean Diff.', 'Var Ratio']])
         
-        return matched
+        # Return both so the plotter can use them
+        return {'unmatched': unmatched, 'matched': matched}
+
+    def plot(self, 
+             type: str = "balance", 
+             threshold: float = 0.1, 
+             var_names: Optional[dict] = None,
+             colors: tuple = ("#e74c3c", "#3498db")
+             ):
+        """
+        Generates diagnostic plots.
+        """
+        if self.matched_data is None:
+            raise ValueError("Run .fit() before plotting.")
+            
+        if type == "balance":
+            summary_stats = self.summary(print_output=False)
+            # Pass new arguments to the plotting function
+            love_plot(summary_stats, threshold=threshold, var_names=var_names, colors=colors)
+        else:
+            raise NotImplementedError("Only type='balance' is currently implemented.")
