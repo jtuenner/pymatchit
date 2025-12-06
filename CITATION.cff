@@ -1,11 +1,15 @@
 cff-version: 1.2.0
 title: "pymatchit-causal: Propensity Score Matching and Causal Inference in Python"
 message: "If you use this software, please cite it as below."
+type: software
 authors:
-- family-names: "Tünnermann"
-  given-names: "Jonas"
-  orcid: "https://orcid.org/0009-0006-9609-0611" # Optional: Add your ORCID if you have one
-version: 0.1.2
+  - family-names: "Tünnermann"
+    given-names: "Jonas"
+    orcid: "https://orcid.org/0009-0006-9609-0611"
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.17839552
+version: 0.1.2  # Make sure this matches your new release
 date-released: 2025-12-06
 url: "https://github.com/jtuenner/pymatchit"
 license: MIT
