@@ -1,5 +1,5 @@
 [project]
-name = "py-matchit"
+name = "pymatchit-causal"
 version = "0.1.0"
 # SEO-Optimized Description:
 description = "Propensity Score Matching (PSM), Coarsened Exact Matching (CEM), and Causal Inference in Python. A port of R's MatchIt."
