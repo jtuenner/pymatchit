@@ -73,11 +73,11 @@ To ensure reliability, `pymatchit` was validated against the original R `MatchIt
 
 As shown in Figure 1, the covariate balance results—measured by Standardized Mean Differences (SMD)—are nearly identical. Both implementations successfully reduced the imbalance (red circles) to below 0.1 standard deviations (blue circles) for most covariates.
 
-![Covariate Balance Comparison: Python (pymatchit) vs R (MatchIt). The reduction in Standardized Mean Difference is consistent across both implementations.](paper/plots/love_plot.png)
+![Covariate Balance Comparison: Python (pymatchit) vs R (MatchIt). The reduction in Standardized Mean Difference is consistent across both implementations.](plots/love_plot.png)
 
 We further analyzed the specific units selected by the greedy matching algorithm (Figure 2). While there is substantial overlap (Green Xs, 89 units), there are minor discrepancies in unit selection (Orange circles vs. Blue crosses).
 
-![Unit Selection Comparison. Discrepancies occur due to floating-point precision differences in Propensity Score estimation between Python's `statsmodels` and R's `glm`.](paper/plots/unit_comparison.png)
+![Unit Selection Comparison. Discrepancies occur due to floating-point precision differences in Propensity Score estimation between Python's `statsmodels` and R's `glm`.](plots/unit_comparison.png)
 
 These discrepancies are expected and stem from minor floating-point differences between Python's `statsmodels` (used by `pymatchit`) and R's `glm` engine. In greedy nearest-neighbor matching, even a $10^{-8}$ difference in a propensity score can alter the sort order of units, causing the algorithm to pick a different "nearest" neighbor from a dense control pool. Despite these minor unit-level differences, the aggregate statistical balance achieved by `pymatchit` remains statistically equivalent to the R reference implementation.
 
