@@ -166,6 +166,9 @@ class MatchIt:
         lhs = formula.split("~")[0].strip()
         rhs = formula.split("~")[1].strip()
 
+        if not rhs:
+            raise ValueError("Formula cannot be empty on the right side. Please specify covariates (e.g. 'treat ~ age + educ').")
+
         if lhs not in self.data.columns:
             raise ValueError(f"Treatment variable '{lhs}' not found in dataframe.")
         self._treatment_col = lhs

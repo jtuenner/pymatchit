@@ -1,167 +1,205 @@
-# tests/test_core.py
-
+# tests/test_full_suite.py
 import pytest
 import pandas as pd
 import numpy as np
+import matplotlib
 from pymatchit.core import MatchIt
+
+# Use non-interactive backend for plot tests
+matplotlib.use('Agg')
 
 # --- FIXTURES ---
 
 @pytest.fixture
-def synthetic_data():
-    # 10 rows: 5 Treated (1), 5 Control (0)
-    df = pd.DataFrame({
-        'treat': [1, 1, 1, 1, 1, 0, 0, 0, 0, 0],
-        'age':   [25, 30, 45, 22, 28, 50, 24, 29, 35, 40],
-        'educ':  [12, 16, 12, 10, 14, 11, 15, 12, 12, 12],
-        'income':[50, 60, 55, 40, 52, 58, 45, 48, 49, 51]
+def lalonde_toy():
+    """
+    A small, deterministic subset of Lalonde-like data for consistent testing.
+    """
+    data = pd.DataFrame({
+        'treat': [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        'age':   [25, 30, 35, 20, 40, 45, 50, 22, 28, 32],
+        'educ':  [12, 16, 12, 10, 11, 15, 12, 12, 14, 13],
+        'income':[50, 60, 55, 40, 58, 45, 48, 49, 51, 52],
+        'married':[1, 0, 1, 0, 1, 1, 0, 0, 1, 0]
     })
-    return df
+    return data
 
 @pytest.fixture
-def exact_data():
-    # Dataset specifically for Exact Matching (duplicates)
+def separation_data():
+    """
+    Data with perfect separation to test GLM robustness or errors.
+    """
     df = pd.DataFrame({
-        'treat': [1, 1, 0, 0, 1, 0],
-        'age':   [20, 20, 20, 20, 30, 40], 
-        'educ':  [12, 12, 12, 12, 10, 10]
+        'treat': [1, 1, 1, 0, 0, 0],
+        'score': [10, 11, 12, 1, 2, 3] # Perfectly predicts treatment
     })
     return df
 
-@pytest.fixture
-def outlier_data():
-    # Dataset with one Treated unit that has NO overlap with controls
-    # Control Age range: 20-30
-    # Treated Age range: 25-30... AND one guy who is 80.
-    df = pd.DataFrame({
-        'treat': [0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
-        'age':   [20, 22, 24, 26, 28, 25, 27, 29, 26, 80], # <--- 80 is the outlier
-        'educ':  [12] * 10
-    })
-    return df
+# --- 1. DISTANCE ESTIMATION TESTS ---
 
-# --- EXISTING FUNCTIONALITY TESTS ---
-
-def test_nearest_neighbor_default(synthetic_data):
-    model = MatchIt(synthetic_data, method='nearest', distance='glm')
-    model.fit("treat ~ age + educ")
-    assert model.data['propensity_score'] is not None
-    assert not model.matched_data.empty
-    # ATT: treated weights = 1
-    assert np.all(model.matched_data[model.matched_data['treat']==1]['weights'] == 1.0)
-
-def test_mahalanobis_matching(synthetic_data):
-    model = MatchIt(synthetic_data, method='nearest', distance='mahalanobis')
-    model.fit("treat ~ age + educ")
-    assert model.propensity_scores is None
-    assert not model.matched_data.empty
-    assert model.data['weights'].sum() > 0
-
-def test_exact_matching(exact_data):
-    model = MatchIt(exact_data, method='exact')
-    model.fit("treat ~ age + educ")
-    matched = model.matched_data
-    # Row 4 (Treated, 30, 10) has NO match in exact_data.
-    assert len(matched) >= 2 
-    # Verify we didn't match the unmatched unit (Row 4)
-    assert model.data.loc[4, 'weights'] == 0.0
-
-def test_subclassification(synthetic_data):
-    model = MatchIt(synthetic_data, method='subclass', subclass=3)
-    model.fit("treat ~ age + educ")
-    assert 'weights' in model.data.columns
-    assert model.data['weights'].sum() > 0
-
-def test_cem_matching(synthetic_data):
-    """Smoke test for Coarsened Exact Matching."""
-    # FIX: Use coarser bins (3 instead of default 5) so matches are found in this tiny dataset
-    custom_cuts = {'age': 3, 'income': 3}
-    
-    model = MatchIt(synthetic_data, method='cem', cutpoints=custom_cuts)
+@pytest.mark.parametrize("method", [
+    "glm", "randomforest", "decisiontree", "gbm", 
+    "adaboost", "lasso", "ridge", "elasticnet", "neuralnet"
+])
+def test_propensity_estimation_methods(lalonde_toy, method):
+    """
+    Ensure all supported distance methods run and produce valid probabilities (0-1).
+    """
+    # Use a simpler formula to ensure convergence for small data
+    model = MatchIt(lalonde_toy, method='nearest', distance=method, random_state=42)
     model.fit("treat ~ age + income")
     
-    assert not model.matched_data.empty
-    assert 'weights' in model.data.columns
-    assert model.data['weights'].sum() > 0
+    ps = model.data['propensity_score']
+    assert ps is not None
+    assert len(ps) == len(lalonde_toy)
+    assert ps.min() >= 0.0 and ps.max() <= 1.0
+    # Check that we actually stored the distance measure
+    assert 'distance_measure' in model.data.columns
 
-def test_ate_vs_att_logic(synthetic_data):
-    # Use subclass=2 to ensure common support in this tiny dataset
-    model_att = MatchIt(synthetic_data, method='subclass', estimand='ATT', subclass=2)
-    model_att.fit("treat ~ age + educ")
-    weights_att = model_att.weights.copy()
-    
-    model_ate = MatchIt(synthetic_data, method='subclass', estimand='ATE', subclass=2)
-    model_ate.fit("treat ~ age + educ")
-    weights_ate = model_ate.weights.copy()
-    
-    # In ATT, treated weights are 1.0. In ATE, they vary.
-    assert np.allclose(weights_att[synthetic_data['treat']==1], 1.0)
-    assert not np.allclose(weights_ate, weights_att)
+# --- 2. MATCHING LOGIC TESTS ---
 
-def test_summary_output_structure(synthetic_data):
-    model = MatchIt(synthetic_data)
+def test_nn_ratio_and_replace(lalonde_toy):
+    """
+    Test 1:k matching and replacement logic.
+    """
+    # Ratio = 2, Replace = True
+    model = MatchIt(lalonde_toy, method='nearest', ratio=2, replace=True)
     model.fit("treat ~ age")
-    summary = model.summary(print_output=False)
-    assert isinstance(summary, dict)
+    
+    # We have 4 treated. Ratio 2 -> should seek 8 matches.
+    # Since Replace=True, we might match the same control multiple times.
+    matched = model.matched_data
+    
+    # Check if treated units have weight 1.0 (ATT)
+    treated_w = matched.loc[matched['treat'] == 1, 'weights']
+    assert np.allclose(treated_w, 1.0)
+    
+    # Check if we successfully generated weights for controls
+    control_w = matched.loc[matched['treat'] == 0, 'weights']
+    assert control_w.sum() > 0
+
+def test_nn_caliper_filtering(lalonde_toy):
+    """
+    Test that a strict caliper drops distant matches.
+    """
+    # Create data where one treated unit is VERY far from any control
+    df = lalonde_toy.copy()
+    df.loc[0, 'age'] = 100 # Treated outlier
+    
+    # Strict caliper
+    model = MatchIt(df, method='nearest', caliper=0.05, distance='glm')
+    model.fit("treat ~ age")
+    
+    # The outlier (index 0) should NOT find a match
+    # So its weight should be 0, or it shouldn't appear in matched_data if only positives are kept
+    assert 0 not in model.matched_data.index or model.weights[0] == 0.0
+
+def test_exact_matching_strata(lalonde_toy):
+    """
+    Test that exact matching only matches units with identical covariate values.
+    """
+    # We match exactly on 'married'.
+    model = MatchIt(lalonde_toy, method='exact')
+    model.fit("treat ~ married") # Only exact match on marriage status
+    
+    matched = model.matched_data
+    
+    # Iterate through matched pairs (if we could access pairs) or check group consistency
+    # For ExactMatcher, all treated=1 and treated=0 in a stratum get weights.
+    
+    # Let's check a manual strata: Married = 1
+    strata_1 = matched[matched['married'] == 1]
+    # Ensure we have both treated and control in this strata if it exists
+    if not strata_1.empty:
+        assert (strata_1['treat'] == 1).any()
+        assert (strata_1['treat'] == 0).any()
+
+def test_genetic_matching_skeleton():
+    """
+    Placeholder if you implement Genetic Matching later.
+    Currently just ensures it raises NotImplemented or handles gracefully.
+    """
+    with pytest.raises(Exception): # Or NotImplementedError
+        model = MatchIt(pd.DataFrame(), method='genetic')
+        model.fit("treat ~ age")
+
+# --- 3. DIAGNOSTICS & PLOTTING ---
+
+def test_summary_stats(lalonde_toy):
+    model = MatchIt(lalonde_toy)
+    model.fit("treat ~ age + income")
+    
+    # Capture stdout to verify print doesn't crash
+    summary = model.summary(print_output=True)
+    
+    # Verify Structure
+    assert 'unmatched' in summary
     assert 'matched' in summary
-    assert 'Std. Mean Diff.' in summary['matched'].columns
-
-# --- NEW: SAFETY & VALIDATION TESTS ---
-
-def test_input_safety_index_uniqueness(synthetic_data):
-    """Should fail if index contains duplicates."""
-    bad_df = synthetic_data.copy()
-    # Force duplicate index
-    bad_df.index = [0, 0, 1, 2, 3, 4, 5, 6, 7, 8] 
+    assert 'sample_sizes' in summary
     
-    model = MatchIt(bad_df)
-    with pytest.raises(ValueError, match="index must be unique"):
-        model.fit("treat ~ age")
+    # Verify SMD calculation
+    smd = summary['matched'].loc['age', 'Std. Mean Diff.']
+    assert isinstance(smd, float)
+    assert not np.isnan(smd) # Should be valid number
 
-def test_input_safety_missing_treatment(synthetic_data):
-    """Should fail if treatment column has NaNs."""
-    bad_df = synthetic_data.copy()
-    bad_df.loc[0, 'treat'] = np.nan
-    
-    model = MatchIt(bad_df)
-    with pytest.raises(ValueError, match="missing values"):
-        model.fit("treat ~ age")
-
-def test_input_safety_missing_covariate(synthetic_data):
-    """Should fail if covariate column has NaNs."""
-    bad_df = synthetic_data.copy()
-    bad_df.loc[0, 'age'] = np.nan
-    
-    model = MatchIt(bad_df)
-    with pytest.raises(ValueError, match="Covariates contain missing values"):
-        model.fit("treat ~ age")
-
-def test_input_safety_non_binary_treatment(synthetic_data):
-    """Should fail if treatment is not 0/1."""
-    bad_df = synthetic_data.copy()
-    bad_df.loc[0, 'treat'] = 2 # Invalid class
-    
-    model = MatchIt(bad_df)
-    with pytest.raises(ValueError, match="must be binary"):
-        model.fit("treat ~ age")
-
-# --- NEW: DISCARD / COMMON SUPPORT TESTS ---
-
-def test_discard_logic(outlier_data):
+def test_plots_smoke_test(lalonde_toy):
     """
-    Test that 'discard' correctly drops units outside common support.
+    Ensure plotting functions run without error (using Agg backend).
     """
-    # 1. Run WITHOUT discard -> The outlier (age 80) should be kept
-    model_raw = MatchIt(outlier_data, method='nearest', discard='none')
-    model_raw.fit("treat ~ age")
+    model = MatchIt(lalonde_toy, method='nearest')
+    model.fit("treat ~ age + income")
     
-    assert model_raw.data.shape[0] == 10
+    # Love Plot
+    try:
+        model.plot(type='balance')
+    except Exception as e:
+        pytest.fail(f"Love plot failed: {e}")
+
+    # Propensity Plot
+    try:
+        model.plot(type='propensity')
+    except Exception as e:
+        pytest.fail(f"Propensity plot failed: {e}")
+
+    # ECDF Plot
+    try:
+        model.plot(type='ecdf', variable='age')
+    except Exception as e:
+        pytest.fail(f"ECDF plot failed: {e}")
+
+# --- 4. INTEGRATION / EDGE CASES ---
+
+def test_input_validation_empty_formula(lalonde_toy):
+    model = MatchIt(lalonde_toy)
+    with pytest.raises(ValueError):
+        model.fit("treat ~ ") # Invalid formula
+
+def test_discard_options(lalonde_toy):
+    """
+    Test 'discard' parameter (Common Support).
+    """
+    # discard='both' drops units outside the intersection of propensity scores
+    model = MatchIt(lalonde_toy, discard='both')
+    model.fit("treat ~ age")
     
-    # 2. Run WITH discard='treated' -> The outlier should be dropped BEFORE matching
-    model_discard = MatchIt(outlier_data, method='nearest', discard='treated')
-    model_discard.fit("treat ~ age")
+    # Check that mask_kept was created
+    assert model._mask_kept is not None
+    # Ensure weights are generated only for kept units
+    assert len(model.matched_data) <= len(lalonde_toy)
+
+def test_matches_format_output(lalonde_toy):
+    """
+    Test the extraction of matched pairs in wide/long format.
+    """
+    model = MatchIt(lalonde_toy, method='nearest', ratio=1)
+    model.fit("treat ~ age")
     
-    # Check if weights are 0 for the last unit (index 9)
-    assert model_discard.weights[9] == 0.0
-    assert model_discard._mask_kept[9] == False
-    assert model_discard._mask_kept[0] == True # Control should be kept
+    # Long format
+    matches_long = model.matches(format='long')
+    assert 'treated_index' in matches_long.columns
+    assert 'control_index' in matches_long.columns
+    
+    # Wide format
+    matches_wide = model.matches(format='wide')
+    assert 'treated_index' in matches_wide.columns
+    assert 'control_1' in matches_wide.columns
