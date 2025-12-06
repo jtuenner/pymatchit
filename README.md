@@ -1,5 +1,7 @@
 # pymatchit-causal: Propensity Score Matching in Python
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17839552.svg)](https://doi.org/10.5281/zenodo.17839552)
+
 **Scalable Causal Inference, Propensity Score Matching (PSM), and Coarsened Exact Matching (CEM).**
 
 `pymatchit-causal` is a Python port of the standard R package `MatchIt`. It allows data scientists to preprocess data for causal inference by balancing covariates between treated and control groups using state-of-the-art matching methods.
