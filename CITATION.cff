@@ -4,7 +4,7 @@ message: "If you use this software, please cite it as below."
 authors:
 - family-names: "Tünnermann"
   given-names: "Jonas"
-  orcid: "https://orcid.org/0000-0000-0000-0000" # Optional: Add your ORCID if you have one
+  orcid: "https://orcid.org/0009-0006-9609-0611" # Optional: Add your ORCID if you have one
 version: 0.1.0
 date-released: 2025-12-06
 url: "https://github.com/jtuenner/pymatchit"
