@@ -1,8 +1,8 @@
-# pymatchit: Propensity Score Matching in Python
+# py-matchit: Propensity Score Matching in Python
 
 **Scalable Causal Inference, Propensity Score Matching (PSM), and Coarsened Exact Matching (CEM).**
 
-`pymatchit` is a Python port of the standard R package `MatchIt`. It allows data scientists to preprocess data for causal inference by balancing covariates between treated and control groups using state-of-the-art matching methods.
+`py-matchit` is a Python port of the standard R package `MatchIt`. It allows data scientists to preprocess data for causal inference by balancing covariates between treated and control groups using state-of-the-art matching methods.
 
 ## Why use pymatchit?
 If you are looking for **Propensity Score Matching** in Python, this library provides a robust, "R-style" workflow including:
@@ -19,7 +19,7 @@ If you are looking for **Propensity Score Matching** in Python, this library pro
 ## Installation
 
 ```bash
-pip install pymatchit
+pip install py-matchit
 ````
 
 ## Quick Start
@@ -44,7 +44,7 @@ matched_data = m.matches()
 
 ## Citation
 
-If you use `pymatchit` in your research, please cite it.
+If you use `py-matchit` in your research, please cite it.
 
 **Until the accompanying paper is published, please cite the software directly:**
 
@@ -52,7 +52,7 @@ If you use `pymatchit` in your research, please cite it.
 
 **BibTeX:**
 ```bibtex
-@software{pymatchit,
+@software{py-matchit,
   author = {Tünnermann, Jonas},
   title = {pymatchit: Propensity Score Matching and Causal Inference in Python},
   url = {[https://github.com/jtuenner/pymatchit](https://github.com/jtuenner/pymatchit)},

@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-title: "pymatchit: Propensity Score Matching and Causal Inference in Python"
+title: "py-matchit: Propensity Score Matching and Causal Inference in Python"
 message: "If you use this software, please cite it as below."
 authors:
 - family-names: "Tünnermann"
