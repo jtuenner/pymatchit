@@ -48,13 +48,13 @@ If you use `pymatchit` in your research, please cite it.
 
 **Until the accompanying paper is published, please cite the software directly:**
 
-> Tünnermann, J. (2025). pymatchit: Nonparametric Preprocessing for Parametric Causal Inference (Version 0.1.0) [Computer software]. https://github.com/jtuenner/pymatchit
+> Tünnermann, J. (2025). pymatchit: Propensity Score Matching and Causal Inference in Python (Version 0.1.0) [Computer software]. https://github.com/jtuenner/pymatchit
 
 **BibTeX:**
 ```bibtex
 @software{pymatchit,
   author = {Tünnermann, Jonas},
-  title = {pymatchit: Nonparametric Preprocessing for Parametric Causal Inference},
+  title = {pymatchit: Propensity Score Matching and Causal Inference in Python},
   url = {[https://github.com/jtuenner/pymatchit](https://github.com/jtuenner/pymatchit)},
   version = {0.1.0},
   year = {2025}
