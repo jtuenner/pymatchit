@@ -210,26 +210,27 @@ class NearestNeighborMatcher(BaseMatcher):
         else:
             sort_order = np.arange(len(X_treated))
 
-        available_control = set(range(len(X_control)))
-        # Safety: don't ask for more neighbors than exist
-        n_fetch = min(len(X_control), self.ratio * 10 + 20)
-        
-        nn = NearestNeighbors(n_neighbors=n_fetch, metric=metric, metric_params=metric_params)
-        nn.fit(X_control)
-        all_dists, all_neighbors = nn.kneighbors(X_treated)
+        available_local = list(range(len(X_control)))
 
         matches = {}
         for i in sort_order:
+            if not available_local:
+                break
             t_idx = treated_indices[i]
-            needed = self.ratio
+            avail_arr = np.array(available_local)
+            k = min(self.ratio, len(available_local))
+            nn = NearestNeighbors(n_neighbors=k, metric=metric, metric_params=metric_params)
+            nn.fit(X_control[avail_arr])
+            dists, neighbors = nn.kneighbors(X_treated[i : i + 1])
+
             found = []
-            for dist, c_internal_idx in zip(all_dists[i], all_neighbors[i]):
-                if len(found) >= needed: break
-                if dist > threshold: continue 
-                if c_internal_idx in available_control:
-                    found.append(control_indices[c_internal_idx])
-                    available_control.remove(c_internal_idx)
-            if len(found) > 0:
+            for dist, local_pos in zip(dists[0], neighbors[0]):
+                if len(found) >= self.ratio: break
+                if dist > threshold: continue
+                true_idx = avail_arr[local_pos]
+                found.append(control_indices[true_idx])
+                available_local.remove(true_idx)
+            if found:
                 matches[t_idx] = found
         return matches
 
