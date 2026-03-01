@@ -11,17 +11,18 @@ def compute_weighted_stats(x: np.ndarray, weights: np.ndarray) -> dict:
     if len(x) == 0 or np.sum(weights) == 0:
         return {'mean': np.nan, 'var': np.nan, 'std': np.nan}
 
+    V1 = np.sum(weights)
+    V2 = np.sum(weights**2)
+    
     # Weighted Mean
     weighted_mean = np.average(x, weights=weights)
 
-    # Weighted Variance (Reliability weights)
-    numerator = np.sum(weights * (x - weighted_mean)**2)
-    denominator = np.sum(weights) - 1
-    
-    if denominator <= 0:
+    # Unbiased weighted sample variance (Reliability weights)
+    if V1**2 <= V2:
         weighted_var = 0.0
     else:
-        weighted_var = numerator / denominator
+        numerator = np.sum(weights * (x - weighted_mean)**2)
+        weighted_var = numerator / (V1 - (V2 / V1))
 
     return {
         'mean': weighted_mean,
@@ -159,15 +160,11 @@ def compute_sample_size_table(
         counts['Discarded']['Control'] = (discarded_mask & control_mask).sum()
     
     # 3. Matched (Weights > 0)
-    # Note: 'Matched' counts the number of units used (weight > 0).
-    # For ATE/Subclass, this might be everyone who wasn't discarded.
     matched_mask = (weights > 0)
     counts['Matched']['Treated'] = (matched_mask & treat_mask).sum()
     counts['Matched']['Control'] = (matched_mask & control_mask).sum()
     
     # 4. Unmatched
-    # Units that were ELIGIBLE (not discarded) but not selected (weight 0).
-    # Logic: All - Discarded - Matched
     counts['Unmatched']['Treated'] = counts['All']['Treated'] - counts['Discarded']['Treated'] - counts['Matched']['Treated']
     counts['Unmatched']['Control'] = counts['All']['Control'] - counts['Discarded']['Control'] - counts['Matched']['Control']
     

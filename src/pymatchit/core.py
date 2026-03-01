@@ -31,14 +31,16 @@ class MatchIt:
         subclass: int = 6,
         discard: str = "none",
         exact: Optional[Union[List[str], str]] = None,
+        m_order: str = "largest",
         cutpoints: Optional[Dict] = None, 
-        distance_options: Optional[Dict[str, Any]] = None, # <--- NEW
+        distance_options: Optional[Dict[str, Any]] = None,
         random_state: Optional[int] = None
     ):
         """
         Args:
             distance_options (dict): Options passed to the distance estimation model 
                                      (e.g. {'n_estimators': 500} for randomforest).
+            m_order (str): The order matches are generated ('largest', 'smallest', 'random', 'data').
         """
         self.data = data.copy()
         self.method = method
@@ -51,8 +53,9 @@ class MatchIt:
         self.subclass = subclass
         self.discard = discard
         self.exact = exact
+        self.m_order = m_order
         self.cutpoints = cutpoints
-        self.distance_options = distance_options # <--- Store it
+        self.distance_options = distance_options 
         self.random_state = random_state
 
         self.formula = None
@@ -72,12 +75,6 @@ class MatchIt:
         should_estimate_ps = (self.distance != "mahalanobis") or (self.discard != "none")
         
         if should_estimate_ps:
-            # Logic: If we are matching with GLM, or we are just discarding, use GLM.
-            # BUT if the user explicitly requested 'randomforest' etc., we use that!
-            
-            # The 'method' arg to estimate_distance IS 'self.distance' (e.g. 'randomforest')
-            # UNLESS self.distance='mahalanobis', in which case we force 'glm' for the background PS.
-            
             estimation_method = self.distance
             if self.distance == "mahalanobis":
                 estimation_method = "glm" 
@@ -85,18 +82,16 @@ class MatchIt:
             ps_scores, ps_dist = estimate_distance(
                 data=self.data,
                 formula=formula,
-                method=estimation_method, # Pass the ML method here
+                method=estimation_method, 
                 link=self.link,
-                distance_options=self.distance_options, # Pass options
+                distance_options=self.distance_options, 
                 random_state=self.random_state
             )
             self.propensity_scores = ps_scores
             
             if self.distance == "mahalanobis":
-                # We calculated PS (via GLM) only for discard/plots, not for matching
                 self.distance_measure = None
             else:
-                # We use the calculated distance (which might be from RF, GBM, etc.)
                 self.distance_measure = ps_dist
         else:
             self.propensity_scores = None
@@ -149,10 +144,7 @@ class MatchIt:
 
         for col in df.columns:
             if "index" in col or "control_" in col:
-                try:
-                    df[col] = df[col].astype("Int64")
-                except:
-                    pass 
+                df[col] = pd.to_numeric(df[col], errors='coerce').astype("Int64")
         
         return df
 
@@ -185,6 +177,11 @@ class MatchIt:
         if self.data[lhs].isnull().any():
             raise ValueError(f"Treatment variable '{lhs}' contains missing values (NaN). Please drop or impute them.")
 
+        covariates = [c.strip() for c in rhs.replace(":", "+").replace("*", "+").split("+")]
+        missing_covs = [c for c in covariates if c in self.data.columns and self.data[c].isna().any()]
+        if missing_covs:
+            raise ValueError(f"Missing values (NaN) found in covariates: {missing_covs}. pymatchit requires complete data. Please impute or drop missing rows.")
+
         if self.exact is not None:
             if isinstance(self.exact, str):
                 self.exact = [self.exact]
@@ -205,7 +202,6 @@ class MatchIt:
                 raise ValueError(f"Error parsing formula or data: {str(e)}") from e
         except Exception as e:
             raise ValueError(f"Unexpected data validation error: {str(e)}") from e
-
 
     def _apply_discard_logic(self):
         treat_mask = (self.data[self._treatment_col] == 1)
@@ -249,6 +245,7 @@ class MatchIt:
                 ratio=self.ratio, 
                 replace=self.replace, 
                 caliper=self.caliper,
+                m_order=self.m_order,
                 random_state=self.random_state,
                 mahalanobis=is_mahalanobis
             )
@@ -295,7 +292,8 @@ class MatchIt:
             active_covs = X_data
             active_exact = self.data[self.exact] if self.exact else None
 
-        matches, sub_weights = matcher.match(
+        # Capture matches, weights AND the new subclasses
+        matches, sub_weights, subclasses = matcher.match(
             treatment=active_treat,
             distance_measure=active_dist,
             covariates=active_covs,
@@ -305,12 +303,22 @@ class MatchIt:
         
         self.matched_indices = matches
         
+        # Hydrate weights back to original dataframe length
         full_weights = pd.Series(0.0, index=self.data.index)
         full_weights.update(sub_weights)
         
+        # Hydrate subclasses back to original dataframe length
+        full_subclasses = pd.Series(pd.NA, index=self.data.index)
+        full_subclasses.update(subclasses)
+        
         self.weights = full_weights
         self.data['weights'] = self.weights
+        self.data['subclass'] = full_subclasses # Append the new column
+        
         self.matched_data = self.data[self.data['weights'] > 0].copy()
+        
+        # Cast subclass to standard Nullable Pandas Integer to avoid ugly floats (e.g. 1.0)
+        self.matched_data['subclass'] = pd.to_numeric(self.matched_data['subclass'], errors='coerce').astype("Int64")
         
         n_matched = len(self.matched_data)
         print(f"Matching complete. {n_matched} observations in matched set.")
@@ -327,11 +335,19 @@ class MatchIt:
             raise ValueError("You must run .fit() before .summary()")
 
         rhs = self.formula.split("~")[1]
-        covariates = [x.strip() for x in rhs.split("+")]
+        
+        X_data = pd.DataFrame(patsy.dmatrix(rhs, self.data, return_type='dataframe'))
+        if 'Intercept' in X_data.columns:
+            X_data = X_data.drop(columns=['Intercept'])
+            
+        covariates = list(X_data.columns)
+        
+        summary_df = X_data.copy()
+        summary_df[self._treatment_col] = self.data[self._treatment_col]
         
         unmatched, matched = create_summary_table(
-            original_data=self.data,
-            matched_data=self.matched_data,
+            original_data=summary_df,
+            matched_data=self.matched_data, 
             covariates=covariates,
             treatment_col=self._treatment_col,
             weights=self.weights,
@@ -339,7 +355,7 @@ class MatchIt:
         )
         
         sample_sizes = compute_sample_size_table(
-            data=self.data,
+            data=self.data, 
             treatment_col=self._treatment_col,
             weights=self.weights,
             mask_kept=self._mask_kept
@@ -379,6 +395,11 @@ class MatchIt:
                 raise ValueError("You must specify 'variable=' for eCDF plots.")
             if variable not in self.data.columns:
                 raise ValueError(f"Variable '{variable}' not found in data.")
+            
+            # Ensure the variable is continuous/numeric to prevent Seaborn from crashing
+            if not pd.api.types.is_numeric_dtype(self.data[variable]):
+                raise TypeError(f"eCDF plots are mathematically defined for continuous/numeric variables only. '{variable}' is of type {self.data[variable].dtype}.")
+                
             ecdf_plot(data=self.data, var_name=variable, treatment_col=self._treatment_col, weights=self.weights)
         else:
             raise NotImplementedError(f"Plot type '{type}' not supported. Try 'balance', 'propensity', or 'ecdf'.")
