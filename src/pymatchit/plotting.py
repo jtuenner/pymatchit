@@ -9,19 +9,21 @@ from typing import Optional, Dict, Tuple, List
 def love_plot(
     summary_dict: dict, 
     threshold: float = 0.1, 
-    colors: Tuple[str, str] = ("#e74c3c", "#3498db"),
+    colors: Tuple[str, str] = ("#1f77b4", "#ff7f0e"), # Matplotlib/Seaborn Standard Blau & Orange
     var_names: Optional[Dict[str, str]] = None,
-    title: str = "Covariate Balance (Love Plot)"
+    title: str = "Covariate Balance"
 ):
     """
-    Generates a publication-ready Love Plot (Standardized Mean Differences).
+    Generates a publication-ready Love Plot (Standardized Mean Differences)
+    optimized for high-impact scientific journals.
     """
-    sns.set_theme(style="whitegrid", context="talk")
+    # Clean, minimalistisches Theme (ähnlich dem Propensity-Plot)
+    sns.set_theme(style="white", context="paper", font_scale=1.2)
     
     unmatched_df = summary_dict['unmatched']
     matched_df = summary_dict['matched']
     
-    # Create Plot Data
+    # Plot-Daten vorbereiten
     plot_data = pd.DataFrame({
         'Unmatched': unmatched_df['Std. Mean Diff.'].abs(),
         'Matched': matched_df['Std. Mean Diff.'].abs()
@@ -30,47 +32,66 @@ def love_plot(
     if var_names:
         plot_data = plot_data.rename(index=var_names)
     
+    # NaN-Werte entfernen und sortieren
+    plot_data = plot_data.dropna()
     plot_data = plot_data.sort_values(by='Unmatched', ascending=True)
     covariates = plot_data.index
     y_pos = range(len(covariates))
 
-    fig, ax = plt.subplots(figsize=(10, len(covariates) * 0.8 + 2))
+    # Figur-Größe dynamisch anpassen
+    fig, ax = plt.subplots(figsize=(8, max(4, len(covariates) * 0.5)))
 
     color_unmatched, color_matched = colors
 
-    # Dumbbell Lines
+    # Zarte, graue Verbindungslinien (Dumbbells)
     for i, cov in enumerate(covariates):
+        val_unmatched = plot_data.loc[cov, 'Unmatched']
+        val_matched = plot_data.loc[cov, 'Matched']
         ax.hlines(y=i, 
-                  xmin=plot_data.loc[cov, 'Matched'], 
-                  xmax=plot_data.loc[cov, 'Unmatched'], 
-                  color='grey', alpha=0.4, linewidth=2, zorder=1)
+                  xmin=min(val_matched, val_unmatched), 
+                  xmax=max(val_matched, val_unmatched), 
+                  color='#cccccc', linewidth=1.5, zorder=1)
 
-    # Points
+    # Datenpunkte: Akademisch & präzise
+    # Unmatched: Etwas kleiner, dezenter
     ax.scatter(plot_data['Unmatched'], y_pos, 
                color=color_unmatched, label='Unmatched', 
-               s=150, edgecolor='white', linewidth=1.5, zorder=3)
+               marker='o', s=70, alpha=0.8, edgecolor='none', zorder=2)
     
+    # Matched: Größer, solider, mit feinem weißen Rand zur Abgrenzung
     ax.scatter(plot_data['Matched'], y_pos, 
                color=color_matched, label='Matched', 
-               s=150, edgecolor='white', linewidth=1.5, zorder=3)
+               marker='o', s=100, edgecolor='white', linewidth=0.8, zorder=3)
 
-    # Reference Lines
+    # Referenzlinien (Wissenschaftlicher Standard)
     ax.axvline(x=0, color='black', linestyle='-', linewidth=1, zorder=0)
-    ax.axvline(x=threshold, color='grey', linestyle='--', linewidth=1.5, 
+    ax.axvline(x=threshold, color='#555555', linestyle='--', linewidth=1.2, 
                label=f'Threshold ({threshold})', zorder=0)
 
+    # Achsen-Styling
     ax.set_yticks(y_pos)
-    ax.set_yticklabels(covariates, fontweight='medium')
-    ax.set_xlabel("Absolute Standardized Mean Difference", fontweight='medium', labelpad=15)
-    ax.set_title(title, fontweight='bold', y=1.02)
+    ax.set_yticklabels(covariates, color='black')
+    ax.set_xlabel("Absolute Standardized Mean Difference", color='black', labelpad=10)
     
+    # Titel dezent halten (in Papers oft ganz weggelassen oder nur schlicht)
+    ax.set_title(title, pad=15)
+    
+    # X-Achsen-Limit sauber setzen
     max_val = max(plot_data['Unmatched'].max(), plot_data['Matched'].max())
-    # Handle NaN case for perfect balance or empty plots
     if pd.isna(max_val): max_val = 0.5
     ax.set_xlim(left=-0.02, right=max_val * 1.05)
     
-    ax.legend(loc='lower right', frameon=True, framealpha=0.9, edgecolor='white')
-    sns.despine(left=True, bottom=True)
+    # Sehr dezentes, hellgraues Raster NUR für die X-Achse
+    ax.xaxis.grid(True, linestyle='-', color='#eeeeee', zorder=0)
+    ax.yaxis.grid(False)
+    
+    # Rahmenlinien (Spines) entfernen (Oben, Rechts, Links)
+    sns.despine(left=True, bottom=False, trim=True)
+    ax.tick_params(axis='y', length=0) # Y-Ticks (die kleinen Striche) ausblenden
+    
+    # Rahmenlose Legende (klassisch für Nature/Science)
+    ax.legend(loc='lower right', frameon=False, title="")
+    
     plt.tight_layout()
     plt.show()
 

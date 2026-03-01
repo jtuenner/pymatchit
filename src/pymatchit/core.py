@@ -375,7 +375,8 @@ class MatchIt:
             'sample_sizes': sample_sizes 
         }
 
-    def plot(self, type: str = "balance", variable: Optional[str] = None, threshold: float = 0.1, var_names: Optional[dict] = None, colors: tuple = ("#e74c3c", "#3498db")):
+    def plot(self, type: str = "balance", variable: Optional[str] = None, threshold: float = 0.1, var_names: Optional[dict] = None, colors: tuple = ("#1f77b4", "#ff7f0e")):
+        
         if self.matched_data is None:
             raise ValueError("Run .fit() before plotting.")
             
