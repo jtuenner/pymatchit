@@ -8,7 +8,7 @@ import statsmodels.api as sm
 from typing import Optional, Union, List, Dict, Any
 
 from .distance import estimate_distance
-from .matchers import BaseMatcher, NearestNeighborMatcher, ExactMatcher, SubclassMatcher, CEMMatcher
+from .matchers import BaseMatcher, NearestNeighborMatcher, OptimalMatcher, ExactMatcher, SubclassMatcher, CEMMatcher
 from .diagnostics import create_summary_table, compute_sample_size_table
 from .plotting import love_plot, propensity_plot, ecdf_plot
 
@@ -25,7 +25,7 @@ class MatchIt:
         distance: str = "glm",
         link: str = "logit",
         replace: bool = False,
-        caliper: Optional[float] = None,
+        caliper: Optional[Union[float, Dict[str, float]]] = None,
         ratio: int = 1,
         estimand: str = "ATT",
         subclass: int = 6,
@@ -38,6 +38,9 @@ class MatchIt:
     ):
         """
         Args:
+            method (str): Matching algorithm ('nearest', 'optimal', 'exact', 'subclass', 'cem').
+            caliper (float or dict): A float acting as a global threshold on the distance measure (std devs), 
+                                     or a dict for covariate-specific limits (e.g. {'distance': 0.1, 'age': 2}).
             distance_options (dict): Options passed to the distance estimation model 
                                      (e.g. {'n_estimators': 500} for randomforest).
             m_order (str): The order matches are generated ('largest', 'smallest', 'random', 'data').
@@ -239,13 +242,21 @@ class MatchIt:
             self._mask_kept = keep_mask
 
     def _get_matcher(self) -> BaseMatcher:
+        is_mahalanobis = (self.distance == 'mahalanobis')
+        
         if self.method == 'nearest':
-            is_mahalanobis = (self.distance == 'mahalanobis')
             return NearestNeighborMatcher(
                 ratio=self.ratio, 
                 replace=self.replace, 
                 caliper=self.caliper,
                 m_order=self.m_order,
+                random_state=self.random_state,
+                mahalanobis=is_mahalanobis
+            )
+        elif self.method == 'optimal':
+            return OptimalMatcher(
+                ratio=self.ratio,
+                caliper=self.caliper,
                 random_state=self.random_state,
                 mahalanobis=is_mahalanobis
             )
@@ -284,15 +295,22 @@ class MatchIt:
                 active_dist = self.distance_measure[self._mask_kept]
             else:
                 active_dist = None
-            active_covs = X_data.loc[self._mask_kept]
+            
+            # Combine Original data and Dummies to allow covariates limits on both
+            active_covs = pd.concat([self.data.loc[self._mask_kept], X_data.loc[self._mask_kept]], axis=1)
+            active_covs = active_covs.loc[:, ~active_covs.columns.duplicated()]
+            
             active_exact = self.data.loc[self._mask_kept, self.exact] if self.exact else None
         else:
             active_treat = self.data[self._treatment_col]
             active_dist = self.distance_measure
-            active_covs = X_data
+            
+            # Combine Original data and Dummies to allow covariates limits on both
+            active_covs = pd.concat([self.data, X_data], axis=1)
+            active_covs = active_covs.loc[:, ~active_covs.columns.duplicated()]
+            
             active_exact = self.data[self.exact] if self.exact else None
 
-        # Capture matches, weights AND the new subclasses
         matches, sub_weights, subclasses = matcher.match(
             treatment=active_treat,
             distance_measure=active_dist,
@@ -303,21 +321,17 @@ class MatchIt:
         
         self.matched_indices = matches
         
-        # Hydrate weights back to original dataframe length
         full_weights = pd.Series(0.0, index=self.data.index)
         full_weights.update(sub_weights)
         
-        # Hydrate subclasses back to original dataframe length
         full_subclasses = pd.Series(pd.NA, index=self.data.index)
         full_subclasses.update(subclasses)
         
         self.weights = full_weights
         self.data['weights'] = self.weights
-        self.data['subclass'] = full_subclasses # Append the new column
+        self.data['subclass'] = full_subclasses 
         
         self.matched_data = self.data[self.data['weights'] > 0].copy()
-        
-        # Cast subclass to standard Nullable Pandas Integer to avoid ugly floats (e.g. 1.0)
         self.matched_data['subclass'] = pd.to_numeric(self.matched_data['subclass'], errors='coerce').astype("Int64")
         
         n_matched = len(self.matched_data)
@@ -326,8 +340,8 @@ class MatchIt:
         if n_matched == 0:
             import warnings
             warnings.warn(
-                f"No matches were found! This often happens with '{self.method}' matching "
-                "on continuous variables or if strict cutoffs exclude all units."
+                f"No matches were found! This often happens with strict calipers or '{self.method}' matching "
+                "on continuous variables."
             )
 
     def summary(self, print_output: bool = True):
@@ -376,7 +390,6 @@ class MatchIt:
         }
 
     def plot(self, type: str = "balance", variable: Optional[str] = None, threshold: float = 0.1, var_names: Optional[dict] = None, colors: tuple = ("#1f77b4", "#ff7f0e")):
-        
         if self.matched_data is None:
             raise ValueError("Run .fit() before plotting.")
             
@@ -397,7 +410,6 @@ class MatchIt:
             if variable not in self.data.columns:
                 raise ValueError(f"Variable '{variable}' not found in data.")
             
-            # Ensure the variable is continuous/numeric to prevent Seaborn from crashing
             if not pd.api.types.is_numeric_dtype(self.data[variable]):
                 raise TypeError(f"eCDF plots are mathematically defined for continuous/numeric variables only. '{variable}' is of type {self.data[variable].dtype}.")
                 
