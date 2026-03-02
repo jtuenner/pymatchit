@@ -1,6 +1,6 @@
 # pymatchit-causal: Propensity Score Matching in Python
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17839552.svg)](https://doi.org/10.5281/zenodo.17839552)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17839522.svg)](https://doi.org/10.5281/zenodo.17839522)
 
 **Scalable Causal Inference, Propensity Score Matching (PSM), and Coarsened Exact Matching (CEM).**
 
@@ -224,16 +224,16 @@ The `distance` parameter controls how similarity is calculated.
 
 If you use `pymatchit-causal` in your research, please cite it:
 
-> Tünnermann, J. (2025). pymatchit: Propensity Score Matching and Causal Inference in Python (Version 0.1.2). Zenodo. https://doi.org/10.5281/zenodo.17839552
+> Tünnermann, J. (2025). pymatchit: Propensity Score Matching and Causal Inference in Python (Version 0.2.0). Zenodo. https://doi.org/10.5281/zenodo.17839522
 
 **BibTeX:**
 ```bibtex
 @software{pymatchit_causal,
   author       = {Jonas Tünnermann},
   title        = {pymatchit: Propensity Score Matching and Causal Inference in Python},
-  year         = 2025,
+  year         = 2026,
   publisher    = {Zenodo},
-  version      = {0.1.2},
-  doi          = {10.5281/zenodo.17839552},
-  url          = {[https://doi.org/10.5281/zenodo.17839552](https://doi.org/10.5281/zenodo.17839552)}
+  version      = {0.2.0},
+  doi          = {10.5281/zenodo.17839522},
+  url          = {[https://doi.org/10.5281/zenodo.17839522](https://doi.org/10.5281/zenodo.17839522)}
 }
