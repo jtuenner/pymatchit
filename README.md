@@ -9,11 +9,11 @@
 ## Why use pymatchit?
 If you are looking for **Propensity Score Matching** in Python, this library provides a robust, "R-style" workflow including:
 * **Propensity Score Estimation:** Logistic Regression (GLM), Random Forest, GBM, Neural Networks.
-* **Matching Algorithms:** Nearest Neighbor (Greedy), Exact, Subclassification, and Coarsened Exact Matching (CEM).
+* **Matching Algorithms:** Nearest Neighbor (Greedy), Optimal Matching, Exact, Subclassification, and Coarsened Exact Matching (CEM).
 * **Diagnostics:** Publication-ready Love Plots (Covariate Balance), Propensity Density Plots, and ECDF plots.
 
 ## Features
-* **Matching Methods:** Nearest Neighbor, Exact, Coarsened Exact Matching (CEM), Subclassification.
+* **Matching Methods:** Nearest Neighbor, Optimal Matching, Exact, Coarsened Exact Matching (CEM), Subclassification.
 * **Distance Metrics:** Logistic Regression (GLM), Mahalanobis, Random Forest, GBM, Neural Networks, etc.
 * **Diagnostics:** Love Plots, ECDF Plots, Propensity Score Density Plots, and Summary Tables (SMD, Variance Ratios).
 * **Parity:** Designed to mirror the R `MatchIt` API (`matchit(formula, data, method=...)`).
@@ -41,7 +41,7 @@ Dependencies: `numpy`, `pandas`, `scipy`, `statsmodels`, `matplotlib`, `scikit-l
 
 ## Example Workflow (Excel Data)
 
-This example demonstrates a full analysis pipeline: loading data from Excel, configuring matching, assessing balance, and extracting the matched dataset.
+This example demonstrates a full analysis pipeline: loading data from Excel, configuring matching, assessing balance, extracting the matched dataset, and performing downstream inference.
 
 **Scenario**: You have an Excel file `healthcare_data.xlsx` with a binary treatment variable `took_drug`, an outcome `recovery_time`, and confounders like `age`, `severity`, and `income`.
 
@@ -68,7 +68,7 @@ m = MatchIt(
     method='nearest',           # 1:1 Nearest Neighbor matching
     distance='randomforest',    # Use Random Forest for Propensity Scores
     distance_options={'n_estimators': 500}, # Pass kwargs to sklearn
-    caliper=0.2,                # Drop matches > 0.2 std devs apart
+    caliper={'distance': 0.1, 'age': 2},    # PS within 0.1 SDs, Age within 2 years
     replace=False,              # Match without replacement
     random_state=42             # Reproducibility
 )
@@ -108,11 +108,24 @@ If balance is satisfactory, extract the data for analysis.
 matched_df = m.matches(format='long') 
 
 # Merge back with original data to get outcomes if needed, 
-# or use m.matched_data which retains the original columns + weights.
+# or use m.matched_data which retains the original columns + weights + subclass.
 final_analysis_set = m.matched_data
 
 print(final_analysis_set.head())
-# Now you can perform a weighted regression or T-test on 'recovery_time'
+```
+
+### 5. Downstream Inference and Subclasses
+After running `.fit()`, the `matched_data` dataframe automatically includes a `subclass` column. This integer ID groups matched units together (e.g., a treated unit and its matched control). 
+
+This is essential for calculating cluster-robust standard errors in your final effect estimation:
+
+```python
+import statsmodels.formula.api as smf
+
+# Example: Weighted Least Squares with Cluster-Robust Standard Errors
+model = smf.wls("recovery_time ~ took_drug", data=final_analysis_set, weights=final_analysis_set['weights'])
+results = model.fit(cov_type='cluster', cov_kwds={'groups': final_analysis_set['subclass']})
+print(results.summary())
 ```
 
 ---
@@ -128,12 +141,13 @@ class MatchIt(
     distance: str = "glm",
     link: str = "logit",
     replace: bool = False,
-    caliper: float = None,
+    caliper: Union[float, Dict[str, float]] = None,
     ratio: int = 1,
     estimand: str = "ATT",
     exact: Union[str, List[str]] = None,
     subclass: int = 6,
     discard: str = "none",
+    m_order: str = "largest",
     cutpoints: Dict = None,
     distance_options: Dict = None,
     random_state: int = None
@@ -145,16 +159,17 @@ class MatchIt(
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | **`data`** | `pd.DataFrame` | *Required* | The input dataset containing treatment, outcome, and covariates. |
-| **`method`** | `str` | `"nearest"` | The matching algorithm to use. <br>• **`nearest`**: Nearest Neighbor (Greedy) matching. <br>• **`exact`**: Exact matching on all covariates. <br>• **`subclass`**: Subclassification (Stratification). <br>• **`cem`**: Coarsened Exact Matching. |
+| **`method`** | `str` | `"nearest"` | The matching algorithm to use. <br>• **`nearest`**: Nearest Neighbor (Greedy) matching. <br>• **`optimal`**: Optimal matching that minimizes the global total distance across all matched pairs. <br>• **`exact`**: Exact matching on all covariates. <br>• **`subclass`**: Subclassification (Stratification). <br>• **`cem`**: Coarsened Exact Matching. |
 | **`distance`** | `str` | `"glm"` | The method used to estimate propensity scores or distance. <br>• **`glm`**: Logistic Regression (standard PSM). <br>• **`mahalanobis`**: Mahalanobis distance (no PS estimation). <br>• **ML Methods**: `randomforest`, `gbm`, `neuralnet`, `decisiontree`, `adaboost`, `lasso`, `ridge`, `elasticnet`. |
 | **`link`** | `str` | `"logit"` | The link function for the distance measure. <br>• **`logit`**: Log-odds (linear logit). Recommended for PSM. <br>• **`linear.logit`**: Same as logit. <br>• **`probit`**: Probit regression (only for GLM). <br>• **`linear`**: Raw probabilities (0-1). |
 | **`replace`** | `bool` | `False` | Whether to match with replacement. If `True`, control units can be matched to multiple treated units. |
-| **`caliper`** | `float` | `None` | The maximum allowed distance between matches, expressed in **standard deviations** of the distance measure. Matches exceeding this are dropped. |
+| **`caliper`** | `float` or `dict` | `None` | The maximum allowed distance between matches. If a float, acts as a global threshold on the distance measure in **standard deviations**. If a dict, sets covariate-specific limits (e.g. `{'distance': 0.1, 'age': 2}`). Matches exceeding this are dropped. |
 | **`ratio`** | `int` | `1` | The number of control units to match to each treated unit (e.g., 2 for 1:2 matching). |
 | **`estimand`** | `str` | `"ATT"` | The target causal estimand. <br>• **`ATT`**: Average Treatment Effect on the Treated. <br>• **`ATE`**: Average Treatment Effect (entire population). |
 | **`exact`** | `list` | `None` | A list of column names (e.g. `['gender']`) to enforce **exact** matching on. Matching will occur within strata defined by these variables. |
 | **`subclass`** | `int` | `6` | Number of subclasses to create when using `method='subclass'`. |
 | **`discard`** | `str` | `"none"` | Logic to discard units outside common support. <br>• **`none`**: Keep all units. <br>• **`treated`**: Drop treated units outside control range. <br>• **`control`**: Drop control units outside treated range. <br>• **`both`**: Drop units from both groups outside the intersection. |
+| **`m_order`** | `str` | `"largest"` | The order matches are generated ('largest', 'smallest', 'random', 'data'). |
 | **`cutpoints`**| `dict` | `None` | For `method='cem'`. Defines cutpoints for continuous variables. Example: `{'age': 4, 'income': [0, 20k, 50k, 100k]}`. |
 | **`distance_options`** | `dict` | `None` | Keyword arguments passed directly to the underlying `scikit-learn` estimator (e.g., `{'n_estimators': 100}` for Random Forest). |
 
@@ -192,15 +207,18 @@ Retrieves the map of matched units.
     * Supports `caliper` to prune bad matches.
     * Supports `exact` argument for stratified matching (e.g., match nearest neighbor, but *only* within the same 'Gender' group).
 
-2.  **Exact Matching (`method='exact'`)**:
+2. **Optimal Matching (`method='optimal'`)**:
+    * Minimizes the global total distance across all matched pairs.
+
+3.  **Exact Matching (`method='exact'`)**:
     * Matches units that have identical values for *all* covariates in the formula.
     * Often results in many discarded units if covariates are continuous.
 
-3.  **Subclassification (`method='subclass'`)**:
+4.  **Subclassification (`method='subclass'`)**:
     * Divides the sample into subclasses (bins) based on propensity score quantiles.
     * Weights are calculated to balance the subclasses. Robust for estimating ATE.
 
-4.  **Coarsened Exact Matching (`method='cem'`)**:
+5.  **Coarsened Exact Matching (`method='cem'`)**:
     * Coarsens continuous variables into bins (defined by `cutpoints`) and matches exactly on these coarsened bins.
     * Very fast and reduces model dependence.
 
@@ -237,3 +255,4 @@ If you use `pymatchit-causal` in your research, please cite it:
   doi          = {10.5281/zenodo.17839522},
   url          = {[https://doi.org/10.5281/zenodo.17839522](https://doi.org/10.5281/zenodo.17839522)}
 }
+```
