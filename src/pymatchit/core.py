@@ -304,19 +304,15 @@ class MatchIt:
             else:
                 active_dist = None
             
-            # Combine Original data and Dummies to allow covariates limits on both
-            active_covs = pd.concat([self.data.loc[self._mask_kept], X_data.loc[self._mask_kept]], axis=1)
-            active_covs = active_covs.loc[:, ~active_covs.columns.duplicated()]
-            
+            # Streng auf Formel-Kovariaten limitieren
+            active_covs = X_data.loc[self._mask_kept]
             active_exact = self.data.loc[self._mask_kept, self.exact] if self.exact else None
         else:
             active_treat = self.data[self._treatment_col]
             active_dist = self.distance_measure
             
-            # Combine Original data and Dummies to allow covariates limits on both
-            active_covs = pd.concat([self.data, X_data], axis=1)
-            active_covs = active_covs.loc[:, ~active_covs.columns.duplicated()]
-            
+            # Streng auf Formel-Kovariaten limitieren
+            active_covs = X_data
             active_exact = self.data[self.exact] if self.exact else None
 
         matches, sub_weights, subclasses = matcher.match(
@@ -327,6 +323,7 @@ class MatchIt:
             exact=active_exact
         )
         
+        # --- DIESER TEIL FEHLTE: Speichern der Ergebnisse ---
         self.matched_indices = matches
         
         full_weights = pd.Series(0.0, index=self.data.index)
@@ -397,13 +394,14 @@ class MatchIt:
             'sample_sizes': sample_sizes 
         }
 
-    def plot(self, type: str = "balance", variable: Optional[str] = None, threshold: float = 0.1, var_names: Optional[dict] = None, colors: tuple = ("#1f77b4", "#ff7f0e")):
+    def plot(self, type: str = "balance", variable: Optional[str] = None, **kwargs):
         if self.matched_data is None:
             raise ValueError("Run .fit() before plotting.")
             
         if type == "balance":
             summary_stats = self.summary(print_output=False)
-            love_plot(summary_stats, threshold=threshold, var_names=var_names, colors=colors)
+            return love_plot(summary_stats, **kwargs)
+            
         elif type == "propensity" or type == "jitter":
             if self.propensity_scores is None:
                 raise ValueError("No propensity scores found (did you use Mahalanobis?). Cannot plot propensity.")
@@ -411,7 +409,8 @@ class MatchIt:
             if 'propensity_score' not in self.data.columns:
                  self.data['propensity_score'] = self.propensity_scores
             
-            propensity_plot(data=self.data, treatment_col=self._treatment_col, weights=self.weights)
+            return propensity_plot(data=self.data, treatment_col=self._treatment_col, weights=self.weights, **kwargs)
+            
         elif type == "ecdf":
             if variable is None:
                 raise ValueError("You must specify 'variable=' for eCDF plots.")
@@ -421,6 +420,7 @@ class MatchIt:
             if not pd.api.types.is_numeric_dtype(self.data[variable]):
                 raise TypeError(f"eCDF plots are mathematically defined for continuous/numeric variables only. '{variable}' is of type {self.data[variable].dtype}.")
                 
-            ecdf_plot(data=self.data, var_name=variable, treatment_col=self._treatment_col, weights=self.weights)
+            return ecdf_plot(data=self.data, var_name=variable, treatment_col=self._treatment_col, weights=self.weights, **kwargs)
+            
         else:
             raise NotImplementedError(f"Plot type '{type}' not supported. Try 'balance', 'propensity', or 'ecdf'.")
