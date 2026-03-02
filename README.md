@@ -242,7 +242,7 @@ The `distance` parameter controls how similarity is calculated.
 
 If you use `pymatchit-causal` in your research, please cite it:
 
-> Tünnermann, J. (2026). pymatchit: Propensity Score Matching and Causal Inference in Python (Version 0.2.0). Zenodo. https://doi.org/10.5281/zenodo.17839522
+> Tünnermann, J. (2026). pymatchit: Propensity Score Matching and Causal Inference in Python (Version 0.2.1). Zenodo. https://doi.org/10.5281/zenodo.17839522
 
 **BibTeX:**
 ```bibtex
@@ -251,7 +251,7 @@ If you use `pymatchit-causal` in your research, please cite it:
   title        = {pymatchit: Propensity Score Matching and Causal Inference in Python},
   year         = 2026,
   publisher    = {Zenodo},
-  version      = {0.2.0},
+  version      = {0.2.1},
   doi          = {10.5281/zenodo.17839522},
   url          = {[https://doi.org/10.5281/zenodo.17839522](https://doi.org/10.5281/zenodo.17839522)}
 }
