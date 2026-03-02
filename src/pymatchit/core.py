@@ -46,6 +46,14 @@ class MatchIt:
             m_order (str): The order matches are generated ('largest', 'smallest', 'random', 'data').
         """
         self.data = data.copy()
+
+        # --- NEW FIX FOR PATSY/PANDAS 2.0 COMPATIBILITY ---
+        # Patsy crashes on pandas StringDtypes. We convert modern strings back to standard objects.
+        for col in self.data.select_dtypes(include=['string']).columns:
+            self.data[col] = self.data[col].astype(object)
+        # --------------------------------------------------
+            
+        
         self.method = method
         self.distance = distance
         self.link = link
