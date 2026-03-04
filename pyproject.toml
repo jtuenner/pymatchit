@@ -1,15 +1,15 @@
 [project]
 name = "pymatchit-causal"
-version = "0.2.3"
+version = "0.5.0"
 # SEO-Optimized Description:
-description = "Propensity Score Matching (PSM), Coarsened Exact Matching (CEM), and Causal Inference in Python. A port of R's MatchIt."
+description = "Propensity Score Matching (PSM), Full Matching, Genetic Matching, Cardinality Matching, CEM, and Causal Inference in Python. A port of R's MatchIt."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {file = "LICENSE"}
 authors = [
   {name = "Jonas Tünnermann", email = "jonas.tuennermann@freenet.de"},
 ]
-# NEW: Keywords for Search Engines
+# Keywords for Search Engines
 keywords = [
     "causal-inference",
     "propensity-score-matching",
@@ -19,7 +19,11 @@ keywords = [
     "coarsened-exact-matching",
     "mahalanobis",
     "observational-studies",
-    "matchit"
+    "matchit",
+    "full-matching",
+    "genetic-matching",
+    "cardinality-matching",
+    "cbps"
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

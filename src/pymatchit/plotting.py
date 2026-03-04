@@ -149,33 +149,229 @@ def ecdf_plot(
     Plots Empirical Cumulative Distribution Function (eCDF) for a specific covariate.
     Returns a matplotlib Axes object.
     """
-    sns.set_theme(style="whitegrid", context="talk")
-    
+    sns.set_theme(style="white", context="talk")
+
+    COLOR_TREATED = "#ff7f0e"
+    COLOR_CONTROL = "#1f77b4"
+
     title = kwargs.pop('title', f"eCDF Balance: {var_name}")
     figsize = kwargs.pop('figsize', (10, 6))
     
     fig, ax = plt.subplots(figsize=figsize, **kwargs)
 
-    sns.ecdfplot(data=data, x=var_name, hue=treatment_col, 
-                 palette=["blue", "orange"], linestyle="--", alpha=0.5, linewidth=2, ax=ax, legend=False)
-
     matched_data = data[weights > 0]
     matched_weights = weights[weights > 0]
-    
+
+    # Draw matched lines first so raw (dashed) lines render on top and stay visible
     sns.ecdfplot(data=matched_data, x=var_name, hue=treatment_col, weights=matched_weights,
-                 palette=["blue", "orange"], linestyle="-", linewidth=3, ax=ax)
+                 palette=[COLOR_CONTROL, COLOR_TREATED], linestyle="-", linewidth=2.5,
+                 ax=ax, legend=False)
+
+    sns.ecdfplot(data=data, x=var_name, hue=treatment_col,
+                 palette=[COLOR_CONTROL, COLOR_TREATED], linestyle="--", alpha=0.7, linewidth=2,
+                 ax=ax, legend=False)
 
     from matplotlib.lines import Line2D
     custom_lines = [
-        Line2D([0], [0], color='orange', lw=2, linestyle='--'),
-        Line2D([0], [0], color='blue', lw=2, linestyle='--'),
-        Line2D([0], [0], color='orange', lw=3, linestyle='-'),
-        Line2D([0], [0], color='blue', lw=3, linestyle='-')
+        Line2D([0], [0], color=COLOR_TREATED, lw=2, linestyle='--'),
+        Line2D([0], [0], color=COLOR_CONTROL, lw=2, linestyle='--'),
+        Line2D([0], [0], color=COLOR_TREATED, lw=2.5, linestyle='-'),
+        Line2D([0], [0], color=COLOR_CONTROL, lw=2.5, linestyle='-')
     ]
-    ax.legend(custom_lines, ['Treated (Raw)', 'Control (Raw)', 'Treated (Matched)', 'Control (Matched)'])
-    
+    ax.legend(custom_lines, ['Treated (Raw)', 'Control (Raw)', 'Treated (Matched)', 'Control (Matched)'],
+              frameon=False)
+
+    ax.xaxis.grid(True, linestyle='-', color='#eeeeee', zorder=0)
+    ax.yaxis.grid(False)
+
     if title:
-        ax.set_title(title, fontweight='bold')
-        
+        ax.set_title(title, pad=15)
+
     sns.despine()
+    plt.tight_layout()
     return ax
+
+
+def qq_plot(
+    data: pd.DataFrame,
+    var_name: str,
+    treatment_col: str,
+    weights: pd.Series,
+    **kwargs
+):
+    """
+    Plots a Quantile-Quantile (QQ) plot comparing treated vs control distributions.
+    Shows both raw (before matching) and matched (after matching) distributions.
+
+    If the points fall along the 45-degree line, the distributions are similar.
+    Returns a matplotlib Axes object.
+    """
+    sns.set_theme(style="white", context="talk")
+
+    COLOR_BEFORE = "#1f77b4"   # unmatched / before – same blue as love_plot unmatched
+    COLOR_AFTER  = "#ff7f0e"   # matched / after  – same orange as love_plot matched
+
+    title = kwargs.pop('title', f"QQ Plot: {var_name}")
+    figsize = kwargs.pop('figsize', (10, 10))
+    n_quantiles = kwargs.pop('n_quantiles', 100)
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize, **kwargs)
+
+    quantiles = np.linspace(0, 1, n_quantiles + 1)
+
+    # --- Before Matching (Raw) ---
+    treated_vals = data.loc[data[treatment_col] == 1, var_name].values
+    control_vals = data.loc[data[treatment_col] == 0, var_name].values
+
+    q_treated = np.quantile(treated_vals, quantiles)
+    q_control = np.quantile(control_vals, quantiles)
+
+    all_vals = np.concatenate([q_treated, q_control])
+    ax_min, ax_max = all_vals.min(), all_vals.max()
+    margin = (ax_max - ax_min) * 0.05
+
+    axes[0].scatter(q_control, q_treated, color=COLOR_BEFORE, alpha=0.6, s=30, edgecolor='none')
+    axes[0].plot([ax_min - margin, ax_max + margin], [ax_min - margin, ax_max + margin],
+                 color='#555555', linestyle='--', linewidth=1, alpha=0.7, label='45° line')
+    axes[0].set_xlabel(f"Control Quantiles ({var_name})")
+    axes[0].set_ylabel(f"Treated Quantiles ({var_name})")
+    axes[0].set_title("Before Matching", fontweight='bold')
+    axes[0].set_xlim(ax_min - margin, ax_max + margin)
+    axes[0].set_ylim(ax_min - margin, ax_max + margin)
+    axes[0].set_aspect('equal')
+    axes[0].xaxis.grid(True, linestyle='-', color='#eeeeee', zorder=0)
+    axes[0].yaxis.grid(True, linestyle='-', color='#eeeeee', zorder=0)
+    axes[0].legend(frameon=False)
+
+    # --- After Matching ---
+    matched_mask = weights > 0
+    matched_data = data[matched_mask]
+    matched_w = weights[matched_mask]
+
+    treated_matched = matched_data[matched_data[treatment_col] == 1]
+    control_matched = matched_data[matched_data[treatment_col] == 0]
+
+    if len(treated_matched) > 0 and len(control_matched) > 0:
+        t_vals = treated_matched[var_name].values
+        t_weights = matched_w.loc[treated_matched.index].values
+        c_vals = control_matched[var_name].values
+        c_weights = matched_w.loc[control_matched.index].values
+
+        q_treated_m = _weighted_quantiles(t_vals, t_weights, quantiles)
+        q_control_m = _weighted_quantiles(c_vals, c_weights, quantiles)
+
+        axes[1].scatter(q_control_m, q_treated_m, color=COLOR_AFTER, alpha=0.7, s=30, edgecolor='none')
+        axes[1].plot([ax_min - margin, ax_max + margin], [ax_min - margin, ax_max + margin],
+                     color='#555555', linestyle='--', linewidth=1, alpha=0.7, label='45° line')
+
+    axes[1].set_xlabel(f"Control Quantiles ({var_name})")
+    axes[1].set_ylabel(f"Treated Quantiles ({var_name})")
+    axes[1].set_title("After Matching", fontweight='bold')
+    axes[1].set_xlim(ax_min - margin, ax_max + margin)
+    axes[1].set_ylim(ax_min - margin, ax_max + margin)
+    axes[1].set_aspect('equal')
+    axes[1].xaxis.grid(True, linestyle='-', color='#eeeeee', zorder=0)
+    axes[1].yaxis.grid(True, linestyle='-', color='#eeeeee', zorder=0)
+    axes[1].legend(frameon=False)
+
+    if title:
+        fig.suptitle(title, y=1.02)
+
+    sns.despine()
+    plt.tight_layout()
+    return axes
+
+
+def jitter_plot(
+    data: pd.DataFrame,
+    treatment_col: str,
+    weights: pd.Series,
+    **kwargs
+):
+    """
+    Creates a jitter plot showing propensity scores for all units,
+    distinguishing matched from unmatched units.
+
+    Returns a matplotlib Axes object.
+    """
+    sns.set_theme(style="white", context="talk")
+
+    COLOR_TREATED = "#ff7f0e"
+    COLOR_CONTROL = "#1f77b4"
+
+    title = kwargs.pop('title', "Propensity Score Jitter Plot")
+    figsize = kwargs.pop('figsize', (12, 6))
+
+    fig, ax = plt.subplots(figsize=figsize, **kwargs)
+
+    matched_mask = weights > 0
+
+    # Treated units
+    treated = data[data[treatment_col] == 1]
+    treated_matched = treated[matched_mask.loc[treated.index]]
+    treated_unmatched = treated[~matched_mask.loc[treated.index]]
+
+    # Control units
+    control = data[data[treatment_col] == 0]
+    control_matched = control[matched_mask.loc[control.index]]
+    control_unmatched = control[~matched_mask.loc[control.index]]
+
+    # Add jitter to y-axis
+    rng = np.random.RandomState(42)
+    jitter_amount = 0.15
+
+    # Plot unmatched (hollow, lower opacity)
+    if len(treated_unmatched) > 0:
+        y_jitter = 1.0 + rng.uniform(-jitter_amount, jitter_amount, len(treated_unmatched))
+        ax.scatter(treated_unmatched['propensity_score'], y_jitter,
+                   color='none', edgecolor=COLOR_TREATED, alpha=0.3, s=20,
+                   linewidth=0.8, label='Treated (Unmatched)')
+
+    if len(control_unmatched) > 0:
+        y_jitter = 0.0 + rng.uniform(-jitter_amount, jitter_amount, len(control_unmatched))
+        ax.scatter(control_unmatched['propensity_score'], y_jitter,
+                   color='none', edgecolor=COLOR_CONTROL, alpha=0.3, s=20,
+                   linewidth=0.8, label='Control (Unmatched)')
+
+    # Plot matched (solid)
+    if len(treated_matched) > 0:
+        y_jitter = 1.0 + rng.uniform(-jitter_amount, jitter_amount, len(treated_matched))
+        ax.scatter(treated_matched['propensity_score'], y_jitter,
+                   color=COLOR_TREATED, alpha=0.8, s=40, edgecolor='white', linewidth=0.5,
+                   label='Treated (Matched)')
+
+    if len(control_matched) > 0:
+        y_jitter = 0.0 + rng.uniform(-jitter_amount, jitter_amount, len(control_matched))
+        ax.scatter(control_matched['propensity_score'], y_jitter,
+                   color=COLOR_CONTROL, alpha=0.8, s=40, edgecolor='white', linewidth=0.5,
+                   label='Control (Matched)')
+
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(['Control', 'Treated'])
+    ax.set_xlabel("Propensity Score")
+    ax.set_ylim(-0.5, 1.5)
+
+    ax.xaxis.grid(True, linestyle='-', color='#eeeeee', zorder=0)
+    ax.yaxis.grid(False)
+
+    if title:
+        ax.set_title(title, pad=15)
+
+    ax.legend(loc='upper right', frameon=False, fontsize=9, ncol=2)
+
+    sns.despine(left=True, bottom=False, trim=True)
+    ax.tick_params(axis='y', length=0)
+    plt.tight_layout()
+    return ax
+
+
+def _weighted_quantiles(values, weights, quantiles):
+    """Compute weighted quantiles."""
+    sorter = np.argsort(values)
+    values = values[sorter]
+    weights = weights[sorter]
+    
+    cumulative_weights = np.cumsum(weights)
+    cumulative_weights /= cumulative_weights[-1]
+    
+    return np.interp(quantiles, cumulative_weights, values)
