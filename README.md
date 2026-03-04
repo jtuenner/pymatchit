@@ -10,11 +10,11 @@
 ## Why use pymatchit?
 If you are looking for **Propensity Score Matching** in Python, this library provides a robust, "R-style" workflow including:
 * **Propensity Score Estimation:** Logistic Regression (GLM), Random Forest, GBM, Neural Networks.
-* **Matching Algorithms:** Nearest Neighbor (Greedy), Optimal Matching, Exact, Subclassification, and Coarsened Exact Matching (CEM).
+* **Matching Algorithms:** Nearest Neighbor (Greedy), Optimal Matching, Exact, Subclassification, Coarsened Exact Matching (CEM), Full Matching, Genetic Matching, and Cardinality Matching.
 * **Diagnostics:** Publication-ready visual alignment—featuring Love Plots (Covariate Balance), Propensity Density Plots, ECDF plots, and the newly added **Jitter Plots** for intuitive match verification.
 
 ## Features
-* **Matching Methods:** Nearest Neighbor, Optimal Matching, Exact, Coarsened Exact Matching (CEM), Subclassification.
+* **Matching Methods:** Nearest Neighbor, Optimal Matching, Exact, Subclassification, Coarsened Exact Matching (CEM), Full Matching, Genetic Matching, Cardinality Matching.
 * **Distance Metrics:** Logistic Regression (GLM), Mahalanobis, Random Forest, GBM, Neural Networks, etc.
 * **Diagnostics:** Cohesive diagnostic plots including visually aligned Love Plots, Jitter Plots, and Summary Tables (SMD, Variance Ratios).
 * **Parity:** Designed to mirror the R `MatchIt` API (`matchit(formula, data, method=...)`).
@@ -113,6 +113,67 @@ model = smf.wls("recovery_time ~ took_drug", data=final_analysis_set, weights=fi
 results = model.fit(cov_type='cluster', cov_kwds={'groups': final_analysis_set['subclass']})
 print(results.summary())
 ```
+
+---
+
+---
+
+## API Reference
+
+### The `MatchIt` Class
+
+```python
+class MatchIt(
+    data: pd.DataFrame,
+    method: str = "nearest",
+    distance: str = "glm",
+    link: str = "logit",
+    replace: bool = False,
+    caliper: Union[float, Dict[str, float]] = None,
+    ratio: int = 1,
+    estimand: str = "ATT",
+    exact: Union[str, List[str]] = None,
+    subclass: int = 6,
+    discard: str = "none",
+    m_order: str = "largest",
+    cutpoints: Dict = None,
+    distance_options: Dict = None,
+    random_state: int = None
+)
+```
+
+#### Parameters
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`data`** | `pd.DataFrame` | *Required* | The input dataset containing treatment, outcome, and covariates. |
+| **`method`** | `str` | `"nearest"` | The matching algorithm to use. <br>• **`nearest`**: Nearest Neighbor (Greedy) matching. <br>• **`optimal`**: Optimal matching. <br>• **`exact`**: Exact matching. <br>• **`subclass`**: Subclassification (Stratification). <br>• **`cem`**: Coarsened Exact Matching. <br>• **`full`**: Full Matching. <br>• **`genetic`**: Genetic Matching. <br>• **`cardinality`**: Cardinality Matching. |
+| **`distance`** | `str` | `"glm"` | The method used to estimate propensity scores or distance. |
+| **`link`** | `str` | `"logit"` | The link function for the distance measure. |
+| **`replace`** | `bool` | `False` | Whether to match with replacement. |
+| **`caliper`** | `float`/`dict` | `None` | The maximum allowed distance between matches. |
+| **`ratio`** | `int` | `1` | The number of control units to match to each treated unit. |
+
+---
+
+## Matching Methods Details
+
+1.  **Nearest Neighbor (`method='nearest'`)**:
+    * Greedy matching. Selects the closest control unit based on distance measure.
+2. **Optimal Matching (`method='optimal'`)**:
+    * Minimizes the global total distance across all matched pairs.
+3.  **Exact Matching (`method='exact'`)**:
+    * Matches units that have identical values for *all* covariates.
+4.  **Subclassification (`method='subclass'`)**:
+    * Divides the sample into subclasses (bins) based on propensity score quantiles.
+5.  **Coarsened Exact Matching (`method='cem'`)**:
+    * Coarsens continuous variables into bins (defined by `cutpoints`) and matches exactly on these coarsened bins.
+6.  **Full Matching (`method='full'`)**:
+    * Optimal subclassification that minimizes the globally calculated total distance within subclasses, where each subclass contains at least one treated and one control unit.
+7.  **Genetic Matching (`method='genetic'`)**:
+    * Uses a genetic/evolutionary algorithm to find optimal covariate weights that maximize balance between groups prior to matching.
+8.  **Cardinality Matching (`method='cardinality'`)**:
+    * Finds the largest possible subset of the data where treated and control groups satisfy user-specified balance constraints (on standardized mean differences).
 
 ---
 
