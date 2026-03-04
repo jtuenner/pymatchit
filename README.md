@@ -72,13 +72,22 @@ summary = m.summary()
 
 # 2. Visual Inspection: Love Plot
 m.plot(type='balance', threshold=0.1)
+```
+![Love Plot](assets/love_plot.png)
 
+```python
 # 3. Visual Inspection: Propensity Jitter Plot (New in 0.5.0!)
 m.plot(type='jitter')
+```
+![Jitter Plot](assets/jitter_plot.png)
 
+```python
 # 4. Visual Inspection: Propensity Density Overlap
 m.plot(type='propensity')
+```
+![Propensity Density Plot](assets/propensity_plot.png)
 
+```python
 # 5. Visual Inspection: ECDF Plot
 m.plot(type='ecdf', variable='age')
 ```
