@@ -1,4 +1,4 @@
-cff-version: 0.2.3
+cff-version: 0.5.0
 title: "pymatchit-causal: Propensity Score Matching and Causal Inference in Python"
 message: "If you use this software, please cite it as below."
 type: software
