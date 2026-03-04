@@ -9,13 +9,13 @@
 
 ## Why use pymatchit?
 If you are looking for **Propensity Score Matching** in Python, this library provides a robust, "R-style" workflow including:
-* **Propensity Score Estimation:** Logistic Regression (GLM), CBPS, Random Forest, GBM, Neural Networks, or user-supplied arrays.
+* **Propensity Score Estimation:** Logistic Regression (GLM), CBPS, Random Forest, GBM, Neural Networks, Decision Trees, AdaBoost, Penalized approaches (Lasso / Ridge / ElasticNet), or user-supplied arrays.
 * **Matching Algorithms:** Nearest Neighbor (Greedy), Optimal Matching, Exact, Subclassification, Coarsened Exact Matching (CEM), Full Matching, Genetic Matching, and Cardinality Matching.
 * **Diagnostics:** Publication-ready visual alignment—featuring Love Plots (Covariate Balance), Propensity Density Plots, ECDF plots, QQ plots, and the newly added **Jitter Plots** for intuitive match verification.
 
 ## Features
 * **Matching Methods:** Nearest Neighbor, Optimal Matching, Exact, Subclassification, Coarsened Exact Matching (CEM), Full Matching, Genetic Matching, Cardinality Matching.
-* **Distance Metrics:** Logistic Regression (GLM), CBPS, Mahalanobis, Random Forest, GBM, Neural Networks, etc., or user-supplied propensity scores.
+* **Distance Metrics:** Logistic Regression (GLM), CBPS, Mahalanobis, Random Forest, GBM, Neural Networks, Decision Trees, AdaBoost, Lasso, Ridge, ElasticNet, or user-supplied propensity scores.
 * **Advanced Configurations:** Target `ATE` or `ATT`, discard units outside common support, combine Mahalanobis distance with a Propensity Score caliper (`mahvars`), and enforce exact matching on subsets (`exact`).
 * **Diagnostics:** Cohesive diagnostic plots including visually aligned Love Plots, Jitter Plots, QQ Plots, and Summary Tables (SMD, Variance Ratios).
 * **Parity:** Designed to mirror the R `MatchIt` API (`matchit(formula, data, method=...)`).
@@ -149,7 +149,7 @@ class MatchIt(
 | :--- | :--- | :--- | :--- |
 | **`data`** | `pd.DataFrame` | *Required* | The input dataset containing treatment, outcome, and covariates. |
 | **`method`** | `str` | `"nearest"` | The matching algorithm to use. <br>• **`nearest`**: Nearest Neighbor (Greedy) matching. <br>• **`optimal`**: Optimal matching. <br>• **`exact`**: Exact matching. <br>• **`subclass`**: Subclassification (Stratification). <br>• **`cem`**: Coarsened Exact Matching. <br>• **`full`**: Full Matching. <br>• **`genetic`**: Genetic Matching. <br>• **`cardinality`**: Cardinality Matching. |
-| **`distance`** | `str` | `"glm"` | The method used to estimate propensity scores or distance. Includes `glm`, `cbps`, `mahalanobis`, or ML methods (`randomforest`, `gbm`, etc.). You may also pass a `numpy` array or `pandas` Series of pre-computed scores. |
+| **`distance`** | `str` | `"glm"` | The method used to estimate propensity scores or distance. Options include `glm`, `cbps`, `mahalanobis`, or ML methods (`randomforest`, `gbm`, `neuralnet`, `decisiontree`, `adaboost`, `lasso`, `ridge`, `elasticnet`). You may also pass a `numpy` array or `pandas` Series of pre-computed scores. |
 | **`link`** | `str` | `"logit"` | The link function for the distance measure. |
 | **`replace`** | `bool` | `False` | Whether to match with replacement. |
 | **`caliper`** | `float`/`dict` | `None` | The maximum allowed distance between matches. |
