@@ -93,7 +93,7 @@ class NearestNeighborMatcher(BaseMatcher):
             
         matches_dict, weights, subclasses = self._build_result(all_matches, treatment.index)
         
-        if estimand == "ATT" and self.ratio > 1:
+        if estimand == "ATT" and self.ratio > 1 and not self.replace:
             control_mask = (treatment == 0)
             weights.loc[control_mask] = weights.loc[control_mask] / self.ratio
             
@@ -169,7 +169,7 @@ class NearestNeighborMatcher(BaseMatcher):
             matches = self._match_without_replacement(X_treated, X_control, treated_indices, control_indices, threshold, metric, metric_params, covs_treated_caliper, covs_control_caliper, cov_thresholds_mapped)
 
         matches_dict, weights, subclasses = self._build_result(matches, treatment.index)
-        if estimand == "ATT" and self.ratio > 1:
+        if estimand == "ATT" and self.ratio > 1 and not self.replace:
             weights.loc[control_mask] = weights.loc[control_mask] / self.ratio
             
         return matches_dict, weights, subclasses
@@ -286,7 +286,7 @@ class OptimalMatcher(BaseMatcher):
             all_matches.update(matches)
             
         matches_dict, weights, subclasses = self._build_result(all_matches, treatment.index)
-        if estimand == "ATT" and self.ratio > 1:
+        if estimand == "ATT" and self.ratio > 1 and not self.replace:
             control_mask = (treatment == 0)
             weights.loc[control_mask] = weights.loc[control_mask] / self.ratio
         return matches_dict, weights, subclasses
@@ -378,7 +378,7 @@ class OptimalMatcher(BaseMatcher):
             matches[t_idx].append(c_idx)
 
         matches_dict, weights, subclasses = self._build_result(matches, treatment.index)
-        if estimand == "ATT" and self.ratio > 1:
+        if estimand == "ATT" and self.ratio > 1 and not self.replace:
             weights.loc[control_mask] = weights.loc[control_mask] / self.ratio
             
         return matches_dict, weights, subclasses
