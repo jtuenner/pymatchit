@@ -203,6 +203,40 @@ def compute_effective_sample_size(weights: pd.Series, treatment: pd.Series) -> D
     }
 
 
+def weighted_ks_statistic(
+    x_t: np.ndarray, w_t: np.ndarray, x_c: np.ndarray, w_c: np.ndarray
+) -> float:
+    """
+    Weighted two-sample KS statistic: the maximum vertical distance between
+    the weighted empirical CDFs of the two samples.
+    """
+    if len(x_t) == 0 or len(x_c) == 0:
+        return np.nan
+    if w_t.sum() <= 0 or w_c.sum() <= 0:
+        return np.nan
+
+    grid = np.unique(np.concatenate([x_t, x_c]))
+
+    def ecdf_at(x, w):
+        order = np.argsort(x, kind="mergesort")
+        x_sorted = x[order]
+        cum = np.cumsum(w[order]) / w.sum()
+        pos = np.searchsorted(x_sorted, grid, side="right")
+        return np.where(pos > 0, cum[np.maximum(pos - 1, 0)], 0.0)
+
+    return float(np.max(np.abs(ecdf_at(x_t, w_t) - ecdf_at(x_c, w_c))))
+
+
+def _ks_pvalue_from_ess(ks: float, ess_t: float, ess_c: float) -> float:
+    """Asymptotic two-sample KS p-value using effective sample sizes."""
+    if np.isnan(ks) or ess_t <= 0 or ess_c <= 0:
+        return np.nan
+    from scipy.stats import kstwobign
+
+    en = np.sqrt(ess_t * ess_c / (ess_t + ess_c))
+    return float(np.clip(kstwobign.sf(en * ks), 0, 1))
+
+
 def compute_ks_statistics(
     data: pd.DataFrame,
     covariates: list,
@@ -212,16 +246,19 @@ def compute_ks_statistics(
     """
     Computes the Kolmogorov-Smirnov (KS) statistic for each covariate
     between treated and control groups, before and after matching.
-    
+
     The KS statistic measures the maximum vertical distance between the
     empirical CDFs of two samples. A smaller value indicates better balance.
-    
+    The matched statistic uses the weighted ECDFs, so it is valid for
+    weighted methods (full, subclass, matching with replacement); its
+    p-value is asymptotic, based on effective sample sizes.
+
     Args:
         data: The dataset.
         covariates: List of covariate column names.
         treatment_col: Treatment indicator column name.
         weights: Matching weights.
-        
+
     Returns:
         DataFrame with KS statistics and p-values before and after matching.
     """
@@ -229,27 +266,33 @@ def compute_ks_statistics(
     treated_mask = data[treatment_col] == 1
     control_mask = data[treatment_col] == 0
     matched_mask = weights > 0
-    
+
     for cov in covariates:
         if not pd.api.types.is_numeric_dtype(data[cov]):
             continue
-            
+
         # Before matching (raw)
         x_t_raw = data.loc[treated_mask, cov].values
         x_c_raw = data.loc[control_mask, cov].values
-        
+
         ks_raw, p_raw = ks_2samp(x_t_raw, x_c_raw)
-        
-        # After matching (weighted)
-        # For KS test with weights, we resample based on weights
-        x_t_matched = data.loc[treated_mask & matched_mask, cov].values
-        x_c_matched = data.loc[control_mask & matched_mask, cov].values
-        
-        if len(x_t_matched) > 0 and len(x_c_matched) > 0:
-            ks_matched, p_matched = ks_2samp(x_t_matched, x_c_matched)
+
+        # After matching: weighted ECDFs
+        t_matched = treated_mask & matched_mask
+        c_matched = control_mask & matched_mask
+        x_t_m = data.loc[t_matched, cov].values
+        w_t_m = weights.loc[t_matched].values.astype(float)
+        x_c_m = data.loc[c_matched, cov].values
+        w_c_m = weights.loc[c_matched].values.astype(float)
+
+        ks_matched = weighted_ks_statistic(x_t_m, w_t_m, x_c_m, w_c_m)
+        if not np.isnan(ks_matched):
+            ess_t = (w_t_m.sum()) ** 2 / (w_t_m ** 2).sum()
+            ess_c = (w_c_m.sum()) ** 2 / (w_c_m ** 2).sum()
+            p_matched = _ks_pvalue_from_ess(ks_matched, ess_t, ess_c)
         else:
-            ks_matched, p_matched = np.nan, np.nan
-        
+            p_matched = np.nan
+
         rows.append({
             'Covariate': cov,
             'KS (Raw)': round(ks_raw, 4),
@@ -257,5 +300,5 @@ def compute_ks_statistics(
             'KS (Matched)': round(ks_matched, 4) if not np.isnan(ks_matched) else np.nan,
             'p-value (Matched)': round(p_matched, 4) if not np.isnan(p_matched) else np.nan,
         })
-    
+
     return pd.DataFrame(rows).set_index('Covariate')

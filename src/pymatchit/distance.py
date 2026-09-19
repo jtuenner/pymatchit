@@ -31,14 +31,17 @@ def estimate_distance(
         formula: R-style formula.
         method: 'glm', 'cbps', 'randomforest', 'decisiontree', 'neuralnet', 'gbm',
                 'adaboost', 'lasso', 'ridge', 'elasticnet'.
-        link: 'logit', 'linear.logit', 'probit' (only for GLM), or 'linear'. 
-              For ML methods, 'logit'/'linear.logit' transforms probabilities to logits.
+        link: 'logit', 'probit', 'linear.logit', or 'linear.probit'.
+              As in R MatchIt, plain links match on the predicted probability;
+              'linear.'-prefixed links match on the linear predictor (logit/probit
+              of the probability). Probit links are only available for GLM.
         distance_options: kwargs passed to the sklearn estimator (e.g. {'n_estimators': 100}).
         random_state: Seed for reproducibility.
 
     Returns:
         propensity_scores: Raw probabilities (0-1).
-        distance_measure: Value used for matching (Linear Logit or Probability).
+        distance_measure: Value used for matching (probability, or linear predictor
+                          for 'linear.'-prefixed links).
     """
     if distance_options is None:
         distance_options = {}
@@ -47,7 +50,7 @@ def estimate_distance(
     if method == "glm":
         # Define Family/Link
         family = sm.families.Binomial()
-        if link == 'probit':
+        if link in ['probit', 'linear.probit']:
             family = sm.families.Binomial(link=sm.families.links.Probit())
         elif link in ['logit', 'linear.logit']:
             family = sm.families.Binomial(link=sm.families.links.Logit())
@@ -59,9 +62,10 @@ def estimate_distance(
             raise RuntimeError(f"Failed to fit GLM Propensity Score model: {str(e)}")
 
         propensity_scores = result.fittedvalues
-        
-        # Calculate Distance Measure
-        if link in ['logit', 'linear.logit', 'probit']:
+
+        # As in R MatchIt: plain links match on the predicted probability,
+        # 'linear.'-prefixed links match on the linear predictor
+        if link in ['linear.logit', 'linear.probit']:
             distance_measure = result.predict(which="linear")
         else:
             distance_measure = propensity_scores
@@ -122,8 +126,9 @@ def estimate_distance(
         scores = model.predict_proba(X)[:, 1]
         propensity_scores = pd.Series(scores, index=data.index)
 
-        # Calculate Distance Measure (Logit transformation if requested)
-        if link in ['logit', 'linear.logit']:
+        # Plain links match on the probability; only 'linear.logit' applies
+        # the logit transform for ML methods
+        if link == 'linear.logit':
             # Clip probabilities to avoid inf/nan in logit
             eps = 1e-9
             clipped_scores = np.clip(propensity_scores, eps, 1 - eps)
@@ -225,7 +230,7 @@ def _estimate_cbps(
 
     propensity_scores = pd.Series(ps, index=data.index)
 
-    if link in ['logit', 'linear.logit']:
+    if link == 'linear.logit':
         eps = 1e-9
         clipped = np.clip(ps, eps, 1 - eps)
         distance_measure = pd.Series(logit(clipped), index=data.index)

@@ -590,12 +590,17 @@ class CEMMatcher(BaseMatcher):
 
 class FullMatcher(BaseMatcher):
     """
-    Implements Full Matching (optimal subclassification).
-    Every unit is placed into a subclass containing at least one treated and
-    one control unit. Minimizes the total within-subclass distance.
+    Implements Full Matching (subclassification with variable ratios).
+    Every matchable unit is placed into a subclass containing at least one
+    treated and one control unit.
 
-    Uses a network-flow approach via scipy's linear_sum_assignment on an
-    expanded cost matrix, then groups remaining units into their nearest subclass.
+    The algorithm is greedy but seeded by an optimal 1:1 assignment
+    (scipy's linear_sum_assignment): the majority group's remaining units
+    are then attached to the subclass of their nearest feasible opposite
+    unit. Units with no within-caliper partner are left unmatched, and
+    min/max controls per subclass are enforced. This approximates, but does
+    not guarantee, the provably optimal full matching of Hansen & Klopfer
+    (2006) used by R's optmatch.
     """
 
     def __init__(self, caliper: Optional[Union[float, Dict[str, float]]] = None,
@@ -678,7 +683,8 @@ class FullMatcher(BaseMatcher):
             X_c = distance_measure[control_mask].values.reshape(-1, 1)
             dist_matrix = cdist(X_t, X_c, metric='euclidean')
 
-        # Apply caliper
+        # Caliper feasibility: pairs outside the caliper cannot share a subclass
+        feasible = np.ones((n_t, n_c), dtype=bool)
         if self.caliper is not None:
             if isinstance(self.caliper, dict):
                 global_cal = self.caliper.get('distance', None)
@@ -690,47 +696,25 @@ class FullMatcher(BaseMatcher):
                 ps_t = distance_measure[treated_mask].values.reshape(-1, 1)
                 ps_c = distance_measure[control_mask].values.reshape(-1, 1)
                 ps_dist = cdist(ps_t, ps_c, metric='euclidean')
-                dist_matrix[ps_dist > threshold] = 1e15
+                feasible = ps_dist <= threshold
 
-        # --- Full Matching Algorithm ---
-        # Step 1: Assign each treated unit to its nearest control (seed subclasses)
-        subclass_assignments = {}  # index -> subclass_id
-        subclass_members = {}  # subclass_id -> {'treated': [], 'control': []}
+        clusters = self._build_clusters(dist_matrix, feasible, n_t, n_c)
 
-        # Each treated unit seeds a subclass
-        for i, t_idx in enumerate(treated_indices):
-            nearest_c = np.argmin(dist_matrix[i])
-            subclass_assignments[t_idx] = i
-            subclass_members[i] = {
-                'treated': [t_idx],
-                'control': [],
-                'center': dist_matrix[i, nearest_c]
-            }
-
-        # Step 2: Assign each control to the nearest treated unit's subclass
-        for j, c_idx in enumerate(control_indices):
-            distances_to_treated = dist_matrix[:, j]
-            nearest_t = np.argmin(distances_to_treated)
-            subclass_id = nearest_t  # subclass ID = treated unit's position
-            subclass_assignments[c_idx] = subclass_id
-            subclass_members[subclass_id]['control'].append(c_idx)
-
-        # Step 3: Compute weights
+        # Compute weights per subclass
         weights = pd.Series(0.0, index=treatment.index)
         subclasses = pd.Series(pd.NA, index=treatment.index)
 
-        for sc_id, members in subclass_members.items():
-            t_list = members['treated']
-            c_list = members['control']
+        for sc_num, members in enumerate(clusters, start=1):
+            t_list = [treated_indices[i] for i in members['treated']]
+            c_list = [control_indices[j] for j in members['control']]
             n_t_sub = len(t_list)
             n_c_sub = len(c_list)
 
             if n_t_sub == 0 or n_c_sub == 0:
                 continue
 
-            # Assign subclass labels (1-indexed)
             for idx in t_list + c_list:
-                subclasses.loc[idx] = sc_id + 1
+                subclasses.loc[idx] = sc_num
 
             if estimand == "ATT":
                 for idx in t_list:
@@ -750,6 +734,154 @@ class FullMatcher(BaseMatcher):
                     weights.loc[idx] = n_c_sub / n_t_sub
 
         return {}, weights, subclasses
+
+    def _build_clusters(self, dist_matrix, feasible, n_t, n_c):
+        """
+        Groups treated/control positions into subclasses.
+
+        Seeds subclasses with an optimal 1:1 assignment between the groups,
+        then attaches each remaining majority-group unit to the subclass of
+        its nearest feasible partner. Units with no feasible partner stay
+        unmatched. Returns a list of {'treated': [...], 'control': [...]}
+        with positional indices.
+        """
+        import warnings
+
+        # Work in an orientation where rows are the smaller group, so the
+        # seeding assigns one column unit to every row unit
+        transpose = n_t > n_c
+        if transpose:
+            D = dist_matrix.T
+            F = feasible.T
+        else:
+            D = dist_matrix
+            F = feasible
+        n_rows, n_cols = D.shape
+
+        if F.any():
+            penalty = (D[F].max() + 1.0) * (n_rows + 1)
+        else:
+            warnings.warn("Full matching: no pair satisfies the caliper; all units unmatched.")
+            return []
+
+        cost = np.where(F, D, penalty)
+        row_ind, col_ind = linear_sum_assignment(cost)
+
+        clusters = []          # {'rows': [...], 'cols': [...]}
+        cluster_of_row = {}
+        cluster_of_col = {}
+        deferred_rows = []
+
+        for r, c in zip(row_ind, col_ind):
+            if F[r, c]:
+                cluster_of_row[r] = len(clusters)
+                cluster_of_col[c] = len(clusters)
+                clusters.append({'rows': [r], 'cols': [c]})
+            else:
+                deferred_rows.append(r)
+
+        # In the transposed orientation rows are controls, so max_controls
+        # caps cluster row counts there; otherwise it caps column counts
+        max_rows = self.max_controls if transpose else None
+        max_cols = self.max_controls if not transpose else None
+
+        # Rows whose optimal partner was infeasible join the cluster of their
+        # nearest feasible column unit (if any); otherwise they stay unmatched
+        for r in deferred_rows:
+            feas_cols = [c for c in np.where(F[r])[0] if c in cluster_of_col]
+            if max_rows is not None:
+                feas_cols = [
+                    c for c in feas_cols
+                    if len(clusters[cluster_of_col[c]]['rows']) < max_rows
+                ]
+            if not feas_cols:
+                continue
+            nearest = min(feas_cols, key=lambda c: D[r, c])
+            cid = cluster_of_col[nearest]
+            clusters[cid]['rows'].append(r)
+            cluster_of_row[r] = cid
+
+        # Attach remaining column units to their nearest feasible row's cluster
+        remaining_cols = [c for c in range(n_cols) if c not in cluster_of_col]
+        for c in remaining_cols:
+            feas_rows = np.where(F[:, c])[0]
+            feas_rows = [r for r in feas_rows if r in cluster_of_row]
+            if not feas_rows:
+                continue
+            for r in sorted(feas_rows, key=lambda r: D[r, c]):
+                cl = clusters[cluster_of_row[r]]
+                if max_cols is not None and len(cl['cols']) >= max_cols:
+                    continue
+                cl['cols'].append(c)
+                break
+
+        if self.min_controls > 1:
+            if transpose:
+                self._merge_for_min_rows(clusters, D, warnings)
+            else:
+                self._steal_for_min_cols(clusters, D, F, warnings)
+
+        # Translate back to treated/control orientation
+        result = []
+        for cl in clusters:
+            if transpose:
+                result.append({'treated': cl['cols'], 'control': cl['rows']})
+            else:
+                result.append({'treated': cl['rows'], 'control': cl['cols']})
+        return result
+
+    def _steal_for_min_cols(self, clusters, D, F, warnings):
+        """Move controls (cols) from clusters with surplus into clusters below
+        min_controls, choosing the closest feasible donor control."""
+        for cl in clusters:
+            while len(cl['cols']) < self.min_controls:
+                donors = [
+                    (D[cl['rows'][0], c], other, c)
+                    for other in clusters
+                    if other is not cl and len(other['cols']) > self.min_controls
+                    for c in other['cols']
+                    if all(F[r, c] for r in cl['rows'])
+                ]
+                if not donors:
+                    warnings.warn(
+                        "Full matching: could not satisfy min_controls_per_subclass "
+                        "for every subclass."
+                    )
+                    return
+                _, donor, c = min(donors, key=lambda d: d[0])
+                donor['cols'].remove(c)
+                cl['cols'].append(c)
+
+    def _merge_for_min_rows(self, clusters, D, warnings):
+        """When controls are rows (more treated than controls), satisfy
+        min_controls by merging undersized clusters. Deficient clusters are
+        paired with their nearest deficient peer first, so merges don't
+        cascade into one giant subclass."""
+
+        def cross_dist(a, b):
+            # Nearest control-treated pair across the two clusters
+            return min(
+                [D[r, c] for r in a['rows'] for c in b['cols']]
+                + [D[r, c] for r in b['rows'] for c in a['cols']]
+            )
+
+        while True:
+            deficient = [cl for cl in clusters if 0 < len(cl['rows']) < self.min_controls]
+            if not deficient or len(clusters) < 2:
+                if deficient:
+                    warnings.warn(
+                        "Full matching: could not satisfy min_controls_per_subclass "
+                        "for every subclass."
+                    )
+                return
+            cl = deficient[0]
+            partners = [o for o in deficient if o is not cl] or [
+                o for o in clusters if o is not cl
+            ]
+            host = min(partners, key=lambda o: cross_dist(cl, o))
+            host['rows'].extend(cl['rows'])
+            host['cols'].extend(cl['cols'])
+            clusters.remove(cl)
 
 
 class GeneticMatcher(BaseMatcher):
@@ -955,23 +1087,106 @@ class CardinalityMatcher(BaseMatcher):
     groups satisfy user-specified balance constraints (on standardized mean
     differences).
 
-    Uses linear programming (scipy.optimize.linprog) to solve the
-    optimization problem.
+    Solves the subset-selection problem exactly as a mixed-integer linear
+    program (scipy.optimize.milp, scipy >= 1.9) using the linearized balance
+    constraints of Zubizarreta, Paredes & Rosenbaum (2014). Falls back to a
+    greedy removal heuristic — which does not guarantee maximality or that
+    the balance constraints are met — when the MILP solver is unavailable
+    or fails.
     """
 
     def __init__(self, tols: Optional[Dict[str, float]] = None,
                  std_tols: float = 0.1,
-                 random_state: Optional[int] = None):
+                 random_state: Optional[int] = None,
+                 solver_time_limit: float = 60.0):
         """
         Args:
             tols: Covariate-specific balance tolerances (absolute mean diff).
                   e.g., {'age': 2.0, 'educ': 0.5}
             std_tols: Default tolerance on standardized mean difference for
                       all covariates. Default is 0.1 (10% of a SD).
+            solver_time_limit: Time limit (seconds) for the MILP solver.
         """
         super().__init__(ratio=1, replace=False, random_state=random_state)
         self.tols = tols if tols is not None else {}
         self.std_tols = std_tols
+        self.solver_time_limit = solver_time_limit
+
+    @staticmethod
+    def _milp_select(X, target, eps, time_limit):
+        """
+        Maximum-cardinality subset of rows of X whose mean is within eps
+        (componentwise) of target. |mean(X_sel) - target| <= eps is
+        linearized as sum_j z_j * (x_jk - target_k -/+ eps_k) <=/>= 0.
+        Returns a boolean mask, or None if the solver is unavailable or
+        produced no feasible solution.
+        """
+        try:
+            from scipy.optimize import milp, LinearConstraint, Bounds
+        except ImportError:
+            return None
+
+        n, p = X.shape
+        rows, lb, ub = [], [], []
+        for k in range(p):
+            a = X[:, k] - target[k]
+            rows.append(a - eps[k]); lb.append(-np.inf); ub.append(0.0)
+            rows.append(a + eps[k]); lb.append(0.0); ub.append(np.inf)
+        rows.append(np.ones(n)); lb.append(1.0); ub.append(n)
+
+        try:
+            res = milp(
+                c=-np.ones(n),
+                constraints=LinearConstraint(np.vstack(rows), lb, ub),
+                integrality=np.ones(n),
+                bounds=Bounds(0, 1),
+                options={"time_limit": time_limit},
+            )
+        except Exception:
+            return None
+
+        if res.x is None:
+            return None
+        sel = res.x > 0.5
+        if sel.sum() == 0:
+            return None
+        # A time-limit incumbent could be infeasible; verify before accepting
+        if np.any(np.abs(X[sel].mean(axis=0) - target) > eps + 1e-8):
+            return None
+        return sel
+
+    @staticmethod
+    def _greedy_select(X, target, eps):
+        """Fallback: iteratively drop the unit most responsible for the
+        worst balance violation against the fixed target."""
+        n = X.shape[0]
+        sel = np.ones(n, dtype=bool)
+        for _ in range(n - 1):
+            means = X[sel].mean(axis=0)
+            viol = np.abs(means - target) - eps
+            if np.all(viol <= 0):
+                break
+            worst = np.argmax(viol)
+            active = np.where(sel)[0]
+            vals = X[active, worst]
+            if means[worst] > target[worst]:
+                remove = active[np.argmax(vals)]
+            else:
+                remove = active[np.argmin(vals)]
+            sel[remove] = False
+        return sel
+
+    def _select(self, X, target, eps):
+        import warnings
+        sel = self._milp_select(X, target, eps, self.solver_time_limit)
+        if sel is None:
+            warnings.warn(
+                "Cardinality matching MILP unavailable or found no feasible solution; "
+                "falling back to a greedy heuristic. The result may not be maximal and "
+                "balance constraints may be violated."
+            )
+            sel = self._greedy_select(X, target, eps)
+        return sel
 
     def match(self, treatment, distance_measure=None, covariates=None,
               estimand="ATT", exact=None, **kwargs):
@@ -1005,134 +1220,52 @@ class CardinalityMatcher(BaseMatcher):
                 # User specified absolute tolerance; convert to standardized
                 tolerances[i] = self.tols[name] / pooled_std[i]
 
-        # --- Greedy Balance-Constrained Subset Selection ---
-        # Strategy: iteratively remove the most extreme control units
-        # that contribute most to imbalance, keeping as many as possible.
+        # Tolerances in raw covariate units
+        eps_raw = tolerances * pooled_std
+
+        weights = pd.Series(0.0, index=treatment.index)
+        subclasses = pd.Series(pd.NA, index=treatment.index)
 
         if estimand == "ATT":
-            # Keep all treated, select subset of controls
-            selected_c_mask = np.ones(n_c, dtype=bool)
-
-            for iteration in range(n_c):
-                # Check current balance
-                if selected_c_mask.sum() == 0:
-                    break
-
-                X_c_sel = X_c[selected_c_mask]
-                mean_t = X_t.mean(axis=0)
-                mean_c = X_c_sel.mean(axis=0)
-                smds = np.abs(mean_t - mean_c) / pooled_std
-
-                if np.all(smds <= tolerances):
-                    break  # Balance achieved!
-
-                # Find worst covariate
-                worst_cov = np.argmax(smds - tolerances)
-
-                # Remove the control unit contributing most to imbalance
-                active_indices = np.where(selected_c_mask)[0]
-                mean_diff_sign = mean_t[worst_cov] - mean_c[worst_cov]
-
-                # If treated mean > control mean, remove the control with
-                # smallest value (pulling mean down); vice versa
-                vals = X_c[active_indices, worst_cov]
-                if mean_diff_sign < 0:
-                    # Control mean too high, remove largest
-                    remove_pos = active_indices[np.argmax(vals)]
-                else:
-                    # Control mean too low, remove smallest
-                    remove_pos = active_indices[np.argmin(vals)]
-
-                selected_c_mask[remove_pos] = False
-
-            # Build results
-            selected_controls = control_indices[selected_c_mask]
-
-            weights = pd.Series(0.0, index=treatment.index)
-            subclasses = pd.Series(pd.NA, index=treatment.index)
+            # Keep all treated; largest control subset balanced to treated means
+            sel_c = self._select(X_c, X_t.mean(axis=0), eps_raw)
+            selected_controls = control_indices[sel_c]
 
             weights.loc[treated_indices] = 1.0
-            if len(selected_controls) > 0:
-                weights.loc[selected_controls] = n_t / len(selected_controls)
+            if sel_c.sum() > 0:
+                weights.loc[selected_controls] = n_t / sel_c.sum()
 
-            # Single subclass for cardinality matching
             subclasses.loc[treated_indices] = 1
             subclasses.loc[selected_controls] = 1
 
-        elif estimand in ("ATE", "ATC"):
-            # For ATE: select subsets from both groups
-            selected_t_mask = np.ones(n_t, dtype=bool)
-            selected_c_mask = np.ones(n_c, dtype=bool)
+        elif estimand == "ATC":
+            # Mirror of ATT: keep all controls, select treated subset
+            sel_t = self._select(X_t, X_c.mean(axis=0), eps_raw)
+            selected_treated = treated_indices[sel_t]
 
-            for iteration in range(n_t + n_c):
-                if selected_t_mask.sum() == 0 or selected_c_mask.sum() == 0:
-                    break
+            weights.loc[control_indices] = 1.0
+            if sel_t.sum() > 0:
+                weights.loc[selected_treated] = n_c / sel_t.sum()
 
-                X_t_sel = X_t[selected_t_mask]
-                X_c_sel = X_c[selected_c_mask]
-                mean_t = X_t_sel.mean(axis=0)
-                mean_c = X_c_sel.mean(axis=0)
-                smds = np.abs(mean_t - mean_c) / pooled_std
+            subclasses.loc[control_indices] = 1
+            subclasses.loc[selected_treated] = 1
 
-                if np.all(smds <= tolerances):
-                    break
+        elif estimand == "ATE":
+            # Template matching: each group's subset is balanced to the
+            # full-sample means within eps/2, which guarantees the SMD
+            # between the selected groups is within the tolerance
+            overall = np.vstack([X_t, X_c]).mean(axis=0)
+            sel_t = self._select(X_t, overall, eps_raw / 2)
+            sel_c = self._select(X_c, overall, eps_raw / 2)
+            selected_treated = treated_indices[sel_t]
+            selected_controls = control_indices[sel_c]
 
-                worst_cov = np.argmax(smds - tolerances)
-                mean_diff = mean_t[worst_cov] - mean_c[worst_cov]
-
-                # Decide which group to remove from (the larger one, or the one
-                # with the extreme value)
-                all_active_t = np.where(selected_t_mask)[0]
-                all_active_c = np.where(selected_c_mask)[0]
-
-                if mean_diff > 0:
-                    # Treated mean too high: remove highest treated OR lowest control
-                    t_vals = X_t[all_active_t, worst_cov]
-                    c_vals = X_c[all_active_c, worst_cov]
-                    t_extreme_diff = t_vals.max() - mean_t[worst_cov]
-                    c_extreme_diff = mean_c[worst_cov] - c_vals.min()
-                    if t_extreme_diff >= c_extreme_diff and len(all_active_t) > 1:
-                        remove_pos = all_active_t[np.argmax(t_vals)]
-                        selected_t_mask[remove_pos] = False
-                    elif len(all_active_c) > 1:
-                        remove_pos = all_active_c[np.argmin(c_vals)]
-                        selected_c_mask[remove_pos] = False
-                    elif len(all_active_t) > 1:
-                        remove_pos = all_active_t[np.argmax(t_vals)]
-                        selected_t_mask[remove_pos] = False
-                else:
-                    # Control mean too high
-                    t_vals = X_t[all_active_t, worst_cov]
-                    c_vals = X_c[all_active_c, worst_cov]
-                    c_extreme_diff = c_vals.max() - mean_c[worst_cov]
-                    t_extreme_diff = mean_t[worst_cov] - t_vals.min()
-                    if c_extreme_diff >= t_extreme_diff and len(all_active_c) > 1:
-                        remove_pos = all_active_c[np.argmax(c_vals)]
-                        selected_c_mask[remove_pos] = False
-                    elif len(all_active_t) > 1:
-                        remove_pos = all_active_t[np.argmin(t_vals)]
-                        selected_t_mask[remove_pos] = False
-                    elif len(all_active_c) > 1:
-                        remove_pos = all_active_c[np.argmax(c_vals)]
-                        selected_c_mask[remove_pos] = False
-
-            selected_treated = treated_indices[selected_t_mask]
-            selected_controls = control_indices[selected_c_mask]
-
-            weights = pd.Series(0.0, index=treatment.index)
-            subclasses = pd.Series(pd.NA, index=treatment.index)
-
-            n_sel_t = len(selected_treated)
-            n_sel_c = len(selected_controls)
-
+            n_sel_t = int(sel_t.sum())
+            n_sel_c = int(sel_c.sum())
             if n_sel_t > 0 and n_sel_c > 0:
-                if estimand == "ATE":
-                    n_total = n_sel_t + n_sel_c
-                    weights.loc[selected_treated] = n_total / n_sel_t
-                    weights.loc[selected_controls] = n_total / n_sel_c
-                else:  # ATC
-                    weights.loc[selected_controls] = 1.0
-                    weights.loc[selected_treated] = n_sel_c / n_sel_t
+                n_total = n_sel_t + n_sel_c
+                weights.loc[selected_treated] = n_total / n_sel_t
+                weights.loc[selected_controls] = n_total / n_sel_c
 
             subclasses.loc[selected_treated] = 1
             subclasses.loc[selected_controls] = 1
