@@ -119,23 +119,17 @@ class MatchIt:
         
         # 1. Estimate Distance / Propensity Scores
         if user_supplied_distance:
-            # User supplied pre-computed propensity scores
+            # User supplied a pre-computed distance vector. Like R MatchIt, the
+            # supplied values are used as-is for matching (no link transform):
+            # they need not be probabilities, so a logit would corrupt them.
             if isinstance(self.distance, np.ndarray):
                 ps = pd.Series(self.distance, index=self.data.index)
             else:
                 ps = self.distance.copy()
                 ps.index = self.data.index
-            
+
             self.propensity_scores = ps
-            
-            # Apply link transformation
-            if self.link in ['logit', 'linear.logit']:
-                from scipy.special import logit
-                eps = 1e-9
-                clipped = np.clip(ps, eps, 1 - eps)
-                self.distance_measure = pd.Series(logit(clipped), index=self.data.index)
-            else:
-                self.distance_measure = ps.copy()
+            self.distance_measure = ps.copy()
         else:
             should_estimate_ps = (distance_method != "mahalanobis") or (self.discard != "none")
             
@@ -185,32 +179,39 @@ class MatchIt:
             print(f"Note: {self.method.capitalize()} matching does not produce pairwise matches.")
             return pd.DataFrame()
 
+        # For ATC the focal group is the control group, so the keys of
+        # matched_indices are control units and the values are treated units
+        if self.estimand == "ATC":
+            key_col, val_col, val_prefix = 'control_index', 'treated_index', 'treated'
+        else:
+            key_col, val_col, val_prefix = 'treated_index', 'control_index', 'control'
+
         if format == "long":
             rows = []
             for t_idx, c_indices in self.matched_indices.items():
                 for c_idx in c_indices:
                     rows.append({
-                        'treated_index': t_idx,
-                        'control_index': c_idx
+                        key_col: t_idx,
+                        val_col: c_idx
                     })
             df = pd.DataFrame(rows)
-            
+
         elif format == "wide":
             rows = []
             for t_idx, c_indices in self.matched_indices.items():
-                row = {'treated_index': t_idx}
+                row = {key_col: t_idx}
                 for i, c_idx in enumerate(c_indices):
-                    row[f'control_{i+1}'] = c_idx
+                    row[f'{val_prefix}_{i+1}'] = c_idx
                 rows.append(row)
             df = pd.DataFrame(rows)
-            
+
         else:
             raise ValueError("Format must be 'long' or 'wide'.")
 
-        for col in df.columns:
-            if "index" in col or "control_" in col:
+        if pd.api.types.is_integer_dtype(self.data.index):
+            for col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').astype("Int64")
-        
+
         return df
 
     def _validate_inputs(self, formula: str):
@@ -273,6 +274,31 @@ class MatchIt:
         if self.estimand not in valid_estimands:
             raise ValueError(f"Estimand must be one of {valid_estimands}, got '{self.estimand}'.")
 
+        # Pair-matching methods cannot target the ATE (same restriction as R MatchIt)
+        if self.estimand == "ATE" and self.method in ("nearest", "optimal", "genetic"):
+            raise ValueError(
+                f"estimand='ATE' is not compatible with method='{self.method}'. "
+                "Use 'full', 'subclass', 'exact', 'cem', or 'cardinality' instead."
+            )
+
+        if self.antiexact is not None and self.method not in ("nearest", "optimal"):
+            raise NotImplementedError(
+                f"antiexact is not supported for method='{self.method}'. "
+                "It is currently available for 'nearest' and 'optimal' matching."
+            )
+
+        if self.mahvars is not None:
+            if self.method not in ("nearest", "optimal", "full"):
+                raise NotImplementedError(
+                    f"mahvars is not supported for method='{self.method}'. "
+                    "It is currently available for 'nearest', 'optimal', and 'full' matching."
+                )
+            if isinstance(self.distance, str) and self.distance == "mahalanobis":
+                raise ValueError(
+                    "mahvars cannot be combined with distance='mahalanobis': mahvars already "
+                    "requests Mahalanobis matching, with the estimated distance kept for calipers."
+                )
+
         try:
             patsy.dmatrix(rhs, self.data, NA_action='raise', return_type='dataframe')
         except patsy.PatsyError as e:
@@ -322,23 +348,27 @@ class MatchIt:
 
     def _get_matcher(self) -> BaseMatcher:
         distance_method = self.distance if isinstance(self.distance, str) else "user"
-        is_mahalanobis = (distance_method == 'mahalanobis')
-        
+        # mahvars also requests Mahalanobis matching (on those variables only),
+        # with the estimated distance measure retained for calipers
+        is_mahalanobis = (distance_method == 'mahalanobis') or (self.mahvars is not None)
+
         if self.method == 'nearest':
             return NearestNeighborMatcher(
-                ratio=self.ratio, 
-                replace=self.replace, 
+                ratio=self.ratio,
+                replace=self.replace,
                 caliper=self.caliper,
                 m_order=self.m_order,
                 random_state=self.random_state,
-                mahalanobis=is_mahalanobis
+                mahalanobis=is_mahalanobis,
+                mahvars=self.mahvars
             )
         elif self.method == 'optimal':
             return OptimalMatcher(
                 ratio=self.ratio,
                 caliper=self.caliper,
                 random_state=self.random_state,
-                mahalanobis=is_mahalanobis
+                mahalanobis=is_mahalanobis,
+                mahvars=self.mahvars
             )
         elif self.method == 'exact':
             return ExactMatcher(
@@ -362,7 +392,8 @@ class MatchIt:
                 min_controls_per_subclass=self.min_controls_per_subclass,
                 max_controls_per_subclass=self.max_controls_per_subclass,
                 random_state=self.random_state,
-                mahalanobis=is_mahalanobis
+                mahalanobis=is_mahalanobis,
+                mahvars=self.mahvars
             )
         elif self.method == 'genetic':
             return GeneticMatcher(
@@ -408,8 +439,7 @@ class MatchIt:
             active_covs = X_data
             active_exact = self.data[self.exact] if self.exact else None
 
-        # Handle antiexact: filter out pairs where antiexact variables match
-        # This is done post-hoc for methods that support it
+        # Antiexact: matchers exclude pairs where any antiexact variable matches
         kwargs = {}
         if self.antiexact is not None:
             kwargs['antiexact'] = self.data[self.antiexact] if self._mask_kept is None else self.data.loc[self._mask_kept, self.antiexact]

@@ -198,13 +198,14 @@ def _estimate_cbps(
         # Negative because we minimize
         return -log_lik + balance_loss
 
-    # Initialize with logistic regression coefficients
+    # Initialize with logistic regression coefficients. X_arr already contains
+    # the patsy intercept column, so no separate sklearn intercept is fit.
     try:
         from sklearn.linear_model import LogisticRegression as LR
-        init_model = LR(random_state=random_state, max_iter=1000, penalty=None, solver='lbfgs')
+        init_model = LR(random_state=random_state, max_iter=1000, penalty=None,
+                        solver='lbfgs', fit_intercept=False)
         init_model.fit(X_arr, y_arr)
-        beta_init = np.concatenate([init_model.intercept_, init_model.coef_.flatten()])
-        # Pad or trim to match X columns (patsy includes intercept)
+        beta_init = init_model.coef_.flatten()
         if len(beta_init) != p:
             beta_init = np.zeros(p)
     except Exception:
