@@ -65,6 +65,30 @@ def test_cem_matching(lalonde_data):
     m.fit('treat ~ age + educ + re74')
     assert len(m.matched_data) > 0
 
+def test_cem_default_uses_sturges_rule():
+    # Synthetic data with a single continuous covariate so the expected
+    # stratum count is exactly known: n=128 gives Sturges' rule
+    # ceil(log2(128) + 1) = 8 bins. x is uniform over [0, 127], so every
+    # equal-width bin is populated, and alternating treatment guarantees
+    # each bin contains both treated and control units. The default must
+    # therefore produce exactly 8 subclasses with no units discarded.
+    n = 128
+    df = pd.DataFrame({
+        'x': np.arange(n, dtype=float),
+        'treat': np.tile([1, 0], n // 2),
+    })
+
+    m_default = MatchIt(df, method='cem')
+    m_default.fit('treat ~ x')
+
+    assert m_default.matched_data['subclass'].nunique() == 8
+    assert len(m_default.matched_data) == n
+
+    # Explicit cutpoints still override the Sturges default
+    m_five = MatchIt(df, method='cem', cutpoints={'x': 5})
+    m_five.fit('treat ~ x')
+    assert m_five.matched_data['subclass'].nunique() == 5
+
 def test_subclass_matching(lalonde_data):
     m = MatchIt(lalonde_data, method='subclass', subclass=5)
     m.fit('treat ~ age + educ + race')

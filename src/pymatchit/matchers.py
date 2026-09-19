@@ -542,10 +542,16 @@ class CEMMatcher(BaseMatcher):
         if covariates is None: raise ValueError("Covariates required for CEM.")
         coarsened = covariates.copy()
         numeric_cols = coarsened.select_dtypes(include=[np.number]).columns
-        
+
+        # Sturges' rule: ceil(log2(n) + 1). Matches the default in R's `cem`
+        # package (via nclass.Sturges) and produces meaningfully more strata
+        # than a fixed default on realistic sample sizes.
+        n_obs = len(coarsened)
+        sturges_bins = int(np.ceil(np.log2(n_obs) + 1)) if n_obs > 1 else 1
+
         for col in numeric_cols:
             if coarsened[col].nunique() <= 2: continue
-            cuts = self.cutpoints[col] if (self.cutpoints and col in self.cutpoints) else 5
+            cuts = self.cutpoints[col] if (self.cutpoints and col in self.cutpoints) else sturges_bins
             try: coarsened[col] = pd.cut(coarsened[col], bins=cuts, labels=False, include_lowest=True)
             except ValueError: pass
 
