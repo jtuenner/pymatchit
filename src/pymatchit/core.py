@@ -51,25 +51,91 @@ class MatchIt:
         random_state: Optional[int] = None
     ):
         """
+        Options that the chosen method cannot honour raise an error when
+        ``.fit()`` is called, rather than being silently ignored (``replace``
+        only warns).
+
         Args:
-            method (str): Matching algorithm ('nearest', 'optimal', 'exact', 
-                          'subclass', 'cem', 'full', 'genetic', 'cardinality').
-            distance (str or array): Distance metric or pre-computed distance vector/matrix.
-                Strings: 'glm', 'cbps', 'mahalanobis', 'randomforest', 'gbm', etc.
-                Arrays: numpy array or pandas Series of pre-computed propensity scores.
-            caliper (float or dict): A float acting as a global threshold on the distance 
-                                     measure (std devs), or a dict for covariate-specific 
-                                     limits (e.g. {'distance': 0.1, 'age': 2}).
-            estimand (str): 'ATT', 'ATE', or 'ATC'.
-            antiexact (list): Variables where matched units must have DIFFERENT values.
-            mahvars (list): Variables for Mahalanobis distance within PS caliper.
-            tols (dict): Covariate-specific balance tolerances for cardinality matching.
-            std_tols (float): Default SMD tolerance for cardinality matching.
-            pop_size (int): Population size for genetic matching optimization.
-            max_generations (int): Max generations for genetic matching.
-            distance_options (dict): Options passed to the distance estimation model 
-                                     (e.g. {'n_estimators': 500} for randomforest).
-            m_order (str): The order matches are generated ('largest', 'smallest', 'random', 'data').
+            data (pd.DataFrame): Data containing the treatment indicator and all
+                covariates referenced in the formula passed to ``.fit()``. The
+                index must be unique. A copy is made internally.
+            method (str): Matching algorithm ('nearest', 'optimal', 'exact',
+                'subclass', 'cem', 'full', 'genetic', 'cardinality').
+                Default 'nearest'.
+            distance (str or array): How the distance measure is obtained.
+                Strings: 'glm', 'cbps', 'mahalanobis', 'randomforest',
+                'decisiontree', 'neuralnet', 'gbm', 'adaboost', 'lasso',
+                'ridge', 'elasticnet'. Arrays: numpy array or pandas Series
+                with one pre-computed score per row of `data`; the values are
+                used as-is (they need not be probabilities, and `link` is not
+                applied). Default 'glm'.
+                Not used by exact, cem, genetic, or cardinality matching, which
+                work on the covariates directly.
+            link (str): Scale of the estimated distance measure, as in R MatchIt.
+                'logit' and 'probit' match on the predicted probability;
+                'linear.logit' and 'linear.probit' match on the linear predictor.
+                Calipers are in standard deviations of this measure, so the
+                choice changes what a given caliper means. Probit links are
+                only available for distance='glm'. Default 'logit'.
+            replace (bool): Whether a control unit can be matched to more than
+                one treated unit. Used by nearest and genetic matching; has no
+                effect elsewhere (a warning is issued). Default False.
+            caliper (float or dict): Maximum allowed difference between matched
+                units. A float is a width on the distance measure, in standard
+                deviations of that measure (computed on the full sample). A dict
+                can combine it with limits on covariates in their own units,
+                e.g. {'distance': 0.1, 'age': 2}.
+                Supported by nearest, optimal, full, and genetic matching.
+                Default None (no caliper).
+            ratio (int): Number of control units to match to each treated unit.
+                Used by nearest, optimal, and genetic matching. Units may end up
+                with fewer matches when controls run out or a caliper binds.
+                Default 1.
+            estimand (str): Target estimand: 'ATT', 'ATC', or 'ATE'. For 'ATC'
+                the control group is the focal group: controls are matched to
+                treated units, and ``matches()`` is keyed by control unit.
+                'ATE' is not available for nearest, optimal, or genetic matching.
+                Default 'ATT'.
+            subclass (int): Number of subclasses for method='subclass'.
+                Default 6.
+            discard (str): Which units to drop before matching for falling
+                outside the common support of the propensity score: 'none',
+                'treated', 'control', or 'both'. Default 'none'.
+            exact (str or list): Variable(s) on which matched units must have
+                IDENTICAL values, in addition to the distance-based matching.
+                Supported by nearest, optimal, and full matching. Default None.
+            antiexact (str or list): Variable(s) on which matched units must have
+                DIFFERENT values. Supported by nearest and optimal matching.
+                Default None.
+            m_order (str): Order in which units are matched in nearest neighbor
+                matching without replacement: 'largest' or 'smallest' (by
+                distance measure), 'random', or 'data' (row order).
+                Default 'largest'.
+            mahvars (list): Variables on which to compute a Mahalanobis distance
+                for matching, while the estimated distance measure is kept for
+                the caliper. Supported by nearest, optimal, and full matching;
+                cannot be combined with distance='mahalanobis'. Default None.
+            cutpoints (dict): For method='cem': per-covariate binning, mapping a
+                column name to either a number of bins or a list of cut points
+                (passed to ``pd.cut``). Numeric covariates not listed are binned
+                with Sturges' rule; covariates with two or fewer distinct values
+                are not coarsened. Default None.
+            tols (dict): For method='cardinality': covariate-specific balance
+                tolerances, as absolute mean differences. Default None.
+            std_tols (float): For method='cardinality': standardized mean
+                difference tolerance for covariates not in `tols`. Default 0.1.
+            pop_size (int): Population size for genetic matching. Default 100.
+            max_generations (int): Maximum generations for genetic matching.
+                Default 50.
+            min_controls_per_subclass (int): Minimum number of control units per
+                subclass in full matching. Default 1.
+            max_controls_per_subclass (int): Maximum number of control units per
+                subclass in full matching. Default None (no limit).
+            distance_options (dict): Options passed to the distance estimation
+                model (e.g. {'n_estimators': 500} for randomforest).
+                Default None.
+            random_state (int): Seed for the stochastic steps (m_order='random',
+                genetic matching, ML-based distance estimators). Default None.
         """
         self.data = data.copy()
 

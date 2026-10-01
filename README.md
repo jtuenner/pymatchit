@@ -16,7 +16,7 @@ If you are looking for **Propensity Score Matching** in Python, this library pro
 ## Features
 * **Matching Methods:** Nearest Neighbor, Optimal Matching, Exact, Subclassification, Coarsened Exact Matching (CEM), Full Matching, Genetic Matching, Cardinality Matching.
 * **Distance Metrics:** Logistic Regression (GLM), CBPS, Mahalanobis, Random Forest, GBM, Neural Networks, Decision Trees, AdaBoost, Lasso, Ridge, ElasticNet, or user-supplied propensity scores.
-* **Advanced Configurations:** Target `ATE` or `ATT`, discard units outside common support, combine Mahalanobis distance with a Propensity Score caliper (`mahvars`), and enforce exact matching on subsets (`exact`).
+* **Advanced Configurations:** Target `ATT`, `ATC`, or `ATE`, discard units outside common support, combine Mahalanobis distance with a Propensity Score caliper (`mahvars`), and enforce exact matching on subsets (`exact`).
 * **Diagnostics:** Cohesive diagnostic plots including visually aligned Love Plots, Jitter Plots, QQ Plots, and Summary Tables (SMD, Variance Ratios).
 * **Parity:** Designed to mirror the R `MatchIt` API (`matchit(formula, data, method=...)`).
 
@@ -150,10 +150,14 @@ class MatchIt(
 | **`data`** | `pd.DataFrame` | *Required* | The input dataset containing treatment, outcome, and covariates. |
 | **`method`** | `str` | `"nearest"` | The matching algorithm to use. <br>• **`nearest`**: Nearest Neighbor (Greedy) matching. <br>• **`optimal`**: Optimal matching. <br>• **`exact`**: Exact matching. <br>• **`subclass`**: Subclassification (Stratification). <br>• **`cem`**: Coarsened Exact Matching. <br>• **`full`**: Full Matching. <br>• **`genetic`**: Genetic Matching. <br>• **`cardinality`**: Cardinality Matching. |
 | **`distance`** | `str` | `"glm"` | The method used to estimate propensity scores or distance. Options include `glm`, `cbps`, `mahalanobis`, or ML methods (`randomforest`, `gbm`, `neuralnet`, `decisiontree`, `adaboost`, `lasso`, `ridge`, `elasticnet`). You may also pass a `numpy` array or `pandas` Series of pre-computed scores. |
-| **`link`** | `str` | `"logit"` | The link function for the distance measure. |
-| **`replace`** | `bool` | `False` | Whether to match with replacement. |
-| **`caliper`** | `float`/`dict` | `None` | The maximum allowed distance between matches. |
-| **`ratio`** | `int` | `1` | The number of control units to match to each treated unit. |
+| **`link`** | `str` | `"logit"` | The scale of the estimated distance measure, as in R `MatchIt`. `logit` and `probit` match on the predicted probability; `linear.logit` and `linear.probit` match on the linear predictor. Probit links require `distance="glm"`. |
+| **`replace`** | `bool` | `False` | Whether to match with replacement (`nearest` and `genetic`). |
+| **`caliper`** | `float`/`dict` | `None` | The maximum allowed distance between matches: a float in standard deviations of the distance measure, or a dict adding covariate limits, e.g. `{"distance": 0.1, "age": 2}`. Supported by `nearest`, `optimal`, `full`, and `genetic`. |
+| **`ratio`** | `int` | `1` | The number of control units to match to each treated unit (`nearest`, `optimal`, `genetic`). |
+| **`estimand`** | `str` | `"ATT"` | `ATT`, `ATC`, or `ATE`. `ATE` is not available for `nearest`, `optimal`, or `genetic`. |
+| **`exact`** | `str`/`list` | `None` | Variables that matched units must share exactly. Supported by `nearest`, `optimal`, and `full`. |
+
+Options that the chosen method cannot honour raise an error instead of being silently ignored. See the `MatchIt` docstring for the full list of parameters.
 
 ---
 
