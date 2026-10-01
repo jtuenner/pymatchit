@@ -208,7 +208,7 @@ See the `MatchIt` docstring for the full list of parameters.
 
 If you use `pymatchit-causal` in your research, please cite it:
 
-> Tünnermann, J. (2026). pymatchit: Propensity Score Matching and Causal Inference in Python (Version 0.5.0). Zenodo. https://doi.org/10.5281/zenodo.17839522
+> Tünnermann, J. (2026). pymatchit: Propensity Score Matching and Causal Inference in Python (Version 0.6.0). Zenodo. https://doi.org/10.5281/zenodo.17839522
 
 **BibTeX:**
 ```bibtex
@@ -217,7 +217,7 @@ If you use `pymatchit-causal` in your research, please cite it:
   title        = {pymatchit: Propensity Score Matching and Causal Inference in Python},
   year         = 2026,
   publisher    = {Zenodo},
-  version      = {0.5.0},
+  version      = {0.6.0},
   doi          = {10.5281/zenodo.17839522},
   url          = {https://doi.org/10.5281/zenodo.17839522}
 }
