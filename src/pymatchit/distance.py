@@ -37,7 +37,8 @@ def _parse_link(method: str, link: str) -> Tuple[str, bool]:
     """
     Splits `link` into the link function and whether the linear predictor is
     requested ('linear.' prefix; 'linear' alone means 'linear.logit').
-    Raises for links the estimator cannot honour.
+    Raises for links that do not exist for the estimator; a linear link is
+    ignored, with a warning, by estimators that only return probabilities.
     """
     linear = link == "linear" or link.startswith("linear.")
     if link == "linear":
@@ -59,10 +60,11 @@ def _parse_link(method: str, link: str) -> Tuple[str, bool]:
             "Use 'logit' or 'linear.logit'."
         )
     elif linear and method in _PROBABILITY_ONLY_METHODS:
-        raise ValueError(
-            f"link='{link}' is not available for distance='{method}', which only "
-            "provides predicted probabilities. Use link='logit'."
+        warnings.warn(
+            f"link='{link}' is ignored for distance='{method}', which only "
+            "provides predicted probabilities; matching on the probability."
         )
+        linear = False
     return base, linear
 
 
@@ -86,8 +88,9 @@ def estimate_distance(
         link: As in R MatchIt, plain links match on the predicted probability;
               'linear.'-prefixed links match on the linear predictor.
               GLM accepts 'logit', 'probit', 'cloglog' and 'cauchit'. Other
-              estimators accept 'logit' and, except for random forests,
-              decision trees and neural networks, 'linear.logit'.
+              estimators accept 'logit' and 'linear.logit'; random forests,
+              decision trees and neural networks only provide probabilities
+              and ignore a linear link with a warning.
         distance_options: kwargs passed to the sklearn estimator (e.g. {'n_estimators': 100}).
         random_state: Seed for reproducibility.
         estimand: 'ATT', 'ATC' or 'ATE'. Used by CBPS, whose balance

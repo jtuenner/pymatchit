@@ -132,9 +132,9 @@ def test_antiexact_combined_with_exact(sim_data):
         )
 
 
-def test_antiexact_unsupported_method_raises(sim_data):
+def test_antiexact_unsupported_method_warns(sim_data):
     m = MatchIt(sim_data, method="cem", antiexact=["site"])
-    with pytest.raises(ValueError, match="antiexact"):
+    with pytest.warns(UserWarning, match="antiexact is not used"):
         m.fit("treat ~ age + educ")
 
 
@@ -183,9 +183,9 @@ def test_mahvars_full_changes_weights(sim_data):
     assert not m_ps.weights.equals(m_mah.weights)
 
 
-def test_mahvars_unsupported_method_raises(sim_data):
+def test_mahvars_unsupported_method_warns(sim_data):
     m = MatchIt(sim_data, method="subclass", mahvars=["age"])
-    with pytest.raises(ValueError, match="mahvars"):
+    with pytest.warns(UserWarning, match="mahvars is not used"):
         m.fit("treat ~ age + educ")
 
 

@@ -165,7 +165,7 @@ class MatchIt(
 
 #### Which options work with which method
 
-This follows R `MatchIt`. An option the chosen method cannot honour raises an error instead of being silently ignored.
+This follows R `MatchIt`. As in R, an option the chosen method cannot use is ignored with a warning, so you can switch `method` without rewriting the call. To turn these warnings into errors, use `warnings.simplefilter("error")`.
 
 | Option | `nearest` | `optimal` | `full` | `genetic` | `cardinality` | `subclass` / `exact` / `cem` |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |

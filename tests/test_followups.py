@@ -33,26 +33,26 @@ def sim_data():
 
 
 # ==========================================
-# Options that cannot be honoured are rejected
+# Options a method cannot use are ignored with a warning, never silently
 # ==========================================
 @pytest.mark.parametrize("method", ["subclass", "cem", "exact"])
-def test_exact_unsupported_methods_raise(sim_data, method):
+def test_exact_unsupported_methods_warn(sim_data, method):
     m = MatchIt(sim_data, method=method, exact=["site"])
-    with pytest.raises(ValueError, match="exact is not supported"):
+    with pytest.warns(UserWarning, match="exact is not used"):
         m.fit(FORMULA)
 
 
 @pytest.mark.parametrize("method", ["subclass", "cem", "cardinality", "exact"])
-def test_caliper_unsupported_methods_raise(sim_data, method):
+def test_caliper_unsupported_methods_warn(sim_data, method):
     m = MatchIt(sim_data, method=method, caliper=0.2)
-    with pytest.raises(ValueError, match="caliper"):
+    with pytest.warns(UserWarning, match="caliper is not used"):
         m.fit(FORMULA)
 
 
 @pytest.mark.parametrize("method", ["optimal", "full", "cardinality", "cem"])
-def test_replace_unsupported_methods_raise(sim_data, method):
+def test_replace_unsupported_methods_warn(sim_data, method):
     m = MatchIt(sim_data, method=method, replace=True)
-    with pytest.raises(ValueError, match="replace is not supported"):
+    with pytest.warns(UserWarning, match="replace is not used"):
         m.fit(FORMULA)
 
 

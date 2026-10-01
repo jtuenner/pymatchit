@@ -2,6 +2,8 @@
 # antiexact, mahvars and m_order across methods, cardinality vs. profile
 # matching, estimand-specific CBPS, and link functions.
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -50,7 +52,7 @@ def _max_abs_smd(m):
 
 
 # ==========================================
-# The support table: unsupported combinations raise
+# The support table: unsupported options are ignored with a warning
 # ==========================================
 ALL_METHODS = [
     "nearest",
@@ -83,19 +85,44 @@ UNSUPPORTED = [
 ]
 
 
+def _fit(data, method, **options):
+    kwargs = GENETIC if method == "genetic" else {"method": method}
+    # Exact matching needs discrete covariates to find any matches
+    formula = "treat ~ black + site" if method == "exact" else FORMULA
+    return MatchIt(data, **kwargs, **options).fit(formula)
+
+
 @pytest.mark.parametrize("option,method", UNSUPPORTED)
-def test_unsupported_combination_raises(sim_data, option, method):
-    m = MatchIt(sim_data, method=method, **{option: OPTION_VALUES[option]})
-    with pytest.raises(ValueError, match=f"{option} is not supported"):
-        m.fit(FORMULA)
+def test_unsupported_option_warns_and_is_ignored(sim_data, option, method):
+    with pytest.warns(UserWarning, match=f"{option} is not used by method='{method}'"):
+        m = _fit(sim_data, method, **{option: OPTION_VALUES[option]})
+    # The result is exactly what the method gives without the option
+    plain = _fit(sim_data, method)
+    assert (plain.weights > 0).any()
+    assert m.weights.equals(plain.weights)
+    assert m.matched_indices == plain.matched_indices
 
 
-def test_default_options_never_raise(sim_data):
+def test_several_unused_options_each_warn(sim_data):
+    """Switching method on a fully specified call keeps working."""
+    options = dict(caliper=0.2, replace=True, ratio=2, exact=["site"])
+    nearest = MatchIt(sim_data, method="nearest", random_state=1, **options)
+    nearest.fit(FORMULA)
+
+    with pytest.warns(UserWarning) as caught:
+        MatchIt(sim_data, method="subclass", random_state=1, **options).fit(FORMULA)
+    messages = " ".join(str(w.message) for w in caught)
+    for option in options:
+        assert f"{option} is not used by method='subclass'" in messages
+
+
+def test_default_options_never_warn(sim_data):
     """Leaving every option at its default is valid for every method."""
     for method in ALL_METHODS:
-        kwargs = GENETIC if method == "genetic" else {"method": method}
-        formula = "treat ~ black + site" if method == "exact" else FORMULA
-        MatchIt(sim_data, **kwargs).fit(formula)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _fit(sim_data, method)
+        assert not [w for w in caught if "is not used by" in str(w.message)]
 
 
 def test_explicit_ratio_one_is_accepted_everywhere(sim_data):
@@ -427,10 +454,11 @@ def test_unknown_link_raises(sim_data):
 
 
 @pytest.mark.parametrize("distance", ["randomforest", "decisiontree", "neuralnet"])
-def test_linear_link_unavailable_for_probability_only_estimators(sim_data, distance):
+def test_linear_link_ignored_for_probability_only_estimators(sim_data, distance):
     m = MatchIt(sim_data, distance=distance, link="linear.logit", random_state=1)
-    with pytest.raises(ValueError, match="only provides predicted probabilities"):
+    with pytest.warns(UserWarning, match="only provides predicted probabilities"):
         m.fit(FORMULA)
+    np.testing.assert_allclose(m.distance_measure, m.propensity_scores)
 
 
 def test_linear_link_available_for_gbm(sim_data):

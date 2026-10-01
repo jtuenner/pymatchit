@@ -1,5 +1,6 @@
 # File: src/pymatchit/core.py
 
+import warnings
 import numpy as np
 import pandas as pd
 import patsy
@@ -23,8 +24,8 @@ from .diagnostics import create_summary_table, compute_sample_size_table
 from .plotting import love_plot, propensity_plot, ecdf_plot, qq_plot, jitter_plot
 
 # Which matching methods can honour each option. This follows R MatchIt's
-# method documentation: an option used outside its row is one that R
-# ignores with a warning, and here it raises an error instead.
+# method documentation: as in R, an option used outside its row is ignored
+# with a warning.
 _OPTION_SUPPORT = {
     "exact": ("nearest", "optimal", "full", "genetic", "cardinality"),
     "antiexact": ("nearest", "optimal", "full", "genetic"),
@@ -76,9 +77,10 @@ class MatchIt:
         random_state: Optional[int] = None,
     ):
         """
-        Which options each method supports follows R MatchIt. An option the
-        chosen method cannot honour raises an error when ``.fit()`` is called,
-        rather than being silently ignored:
+        Which options each method supports follows R MatchIt. As in R, an
+        option the chosen method cannot use is ignored with a warning when
+        ``.fit()`` is called, so the method can be switched without rewriting
+        the call (use ``warnings.simplefilter("error")`` to make it an error):
 
         ========== ======= ======= ==== ======= =========== ==================
         option     nearest optimal full genetic cardinality subclass/exact/cem
@@ -236,6 +238,7 @@ class MatchIt:
         self.weights = None
         self._treatment_col = None
         self._mask_kept = None
+        self._ignored_options = set()
 
     def fit(self, formula: str):
         self.formula = formula
@@ -457,7 +460,7 @@ class MatchIt:
                 "Use 'full', 'subclass', 'exact', 'cem', or 'cardinality' instead."
             )
 
-        # Options a method cannot honour are rejected rather than silently ignored
+        # Options the method cannot use are ignored, with a warning (as in R)
         requested = {
             "exact": self.exact is not None,
             "antiexact": self.antiexact is not None,
@@ -471,15 +474,17 @@ class MatchIt:
             "min_controls_per_subclass": self.min_controls_per_subclass != 1,
             "max_controls_per_subclass": self.max_controls_per_subclass is not None,
         }
+        self._ignored_options = set()
         for option, is_set in requested.items():
             supported = _OPTION_SUPPORT[option]
             if is_set and self.method not in supported:
-                raise ValueError(
-                    f"{option} is not supported for method='{self.method}'. "
+                self._ignored_options.add(option)
+                warnings.warn(
+                    f"{option} is not used by method='{self.method}' and is ignored. "
                     f"It is available for: {', '.join(supported)}."
                 )
 
-        if self.mahvars is not None:
+        if self.mahvars is not None and "mahvars" not in self._ignored_options:
             if self.method == "cardinality":
                 if self.ratio is None:
                     raise ValueError(
@@ -624,6 +629,8 @@ class MatchIt:
         if "Intercept" in X_data.columns:
             X_data = X_data.drop(columns=["Intercept"])
 
+        use_exact = bool(self.exact) and "exact" not in self._ignored_options
+
         if self._mask_kept is not None:
             active_treat = self.data.loc[self._mask_kept, self._treatment_col]
             if self.distance_measure is not None:
@@ -633,18 +640,18 @@ class MatchIt:
 
             active_covs = X_data.loc[self._mask_kept]
             active_exact = (
-                self.data.loc[self._mask_kept, self.exact] if self.exact else None
+                self.data.loc[self._mask_kept, self.exact] if use_exact else None
             )
         else:
             active_treat = self.data[self._treatment_col]
             active_dist = self.distance_measure
 
             active_covs = X_data
-            active_exact = self.data[self.exact] if self.exact else None
+            active_exact = self.data[self.exact] if use_exact else None
 
         # Antiexact: matchers exclude pairs where any antiexact variable matches
         kwargs = {}
-        if self.antiexact is not None:
+        if self.antiexact is not None and "antiexact" not in self._ignored_options:
             kwargs["antiexact"] = (
                 self.data[self.antiexact]
                 if self._mask_kept is None
@@ -681,8 +688,6 @@ class MatchIt:
         print(f"Matching complete. {n_matched} observations in matched set.")
 
         if n_matched == 0:
-            import warnings
-
             warnings.warn(
                 f"No matches were found! This often happens with strict calipers or '{self.method}' matching "
                 "on continuous variables."
