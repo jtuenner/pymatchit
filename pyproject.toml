@@ -48,6 +48,7 @@ dependencies = [
 dev = [
     "pytest",
     "ruff",  # For linting
+    "black",  # For formatting (checked in CI)
     "jupyter", # For running examples
 ]
 

@@ -1,5 +1,6 @@
 # pymatchit-causal: Propensity Score Matching in Python
 
+[![Tests](https://github.com/jtuenner/pymatchit/actions/workflows/test.yml/badge.svg)](https://github.com/jtuenner/pymatchit/actions/workflows/test.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17839522.svg)](https://doi.org/10.5281/zenodo.17839522)
 [![PyPI version](https://badge.fury.io/py/pymatchit-causal.svg)](https://badge.fury.io/py/pymatchit-causal)
 
