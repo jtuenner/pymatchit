@@ -57,7 +57,12 @@ def test_genetic_with_caliper_and_custom_index(sim_data):
     df = sim_data.copy()
     df.index = df.index + 1000
     m = MatchIt(
-        df, method="genetic", caliper=0.25, pop_size=10, max_generations=2, random_state=1
+        df,
+        method="genetic",
+        caliper=0.25,
+        pop_size=10,
+        max_generations=2,
+        random_state=1,
     )
     m.fit("treat ~ age + educ + black")
     assert len(m.matched_data) > 0
@@ -68,7 +73,9 @@ def test_genetic_with_caliper_and_custom_index(sim_data):
 # ==========================================
 def test_genetic_without_replacement_matches_all_possible(sim_data):
     """Used to fetch only `ratio` neighbors, leaving most treated units unmatched."""
-    m = MatchIt(sim_data, method="genetic", pop_size=10, max_generations=2, random_state=1)
+    m = MatchIt(
+        sim_data, method="genetic", pop_size=10, max_generations=2, random_state=1
+    )
     m.fit("treat ~ age + educ + black")
     n_treated = sim_data.treat.sum()
     n_control = (sim_data.treat == 0).sum()
@@ -93,7 +100,9 @@ def test_antiexact_enforced(sim_data, method):
 
 
 def test_antiexact_with_replacement(sim_data):
-    m = MatchIt(sim_data, method="nearest", replace=True, antiexact=["site"], random_state=1)
+    m = MatchIt(
+        sim_data, method="nearest", replace=True, antiexact=["site"], random_state=1
+    )
     m.fit("treat ~ age + educ + black")
     pairs = m.matches()
     assert len(pairs) > 0
@@ -106,7 +115,9 @@ def test_antiexact_with_replacement(sim_data):
 
 def test_antiexact_combined_with_exact(sim_data):
     """antiexact must also be enforced inside exact-matching strata."""
-    m = MatchIt(sim_data, method="nearest", exact=["black"], antiexact=["site"], random_state=1)
+    m = MatchIt(
+        sim_data, method="nearest", exact=["black"], antiexact=["site"], random_state=1
+    )
     m.fit("treat ~ age + educ")
     pairs = m.matches()
     assert len(pairs) > 0
@@ -121,9 +132,9 @@ def test_antiexact_combined_with_exact(sim_data):
         )
 
 
-def test_antiexact_unsupported_method_raises(sim_data):
+def test_antiexact_unsupported_method_warns(sim_data):
     m = MatchIt(sim_data, method="cem", antiexact=["site"])
-    with pytest.raises(NotImplementedError, match="antiexact"):
+    with pytest.warns(UserWarning, match="antiexact is not used"):
         m.fit("treat ~ age + educ")
 
 
@@ -172,9 +183,9 @@ def test_mahvars_full_changes_weights(sim_data):
     assert not m_ps.weights.equals(m_mah.weights)
 
 
-def test_mahvars_unsupported_method_raises(sim_data):
-    m = MatchIt(sim_data, method="genetic", mahvars=["age"])
-    with pytest.raises(NotImplementedError, match="mahvars"):
+def test_mahvars_unsupported_method_warns(sim_data):
+    m = MatchIt(sim_data, method="subclass", mahvars=["age"])
+    with pytest.warns(UserWarning, match="mahvars is not used"):
         m.fit("treat ~ age + educ")
 
 
@@ -208,7 +219,11 @@ def test_atc_stratification_methods_produce_weights(sim_data, method):
     """ATC used to fall through the weight branches, returning an empty matched set."""
     df = sim_data.copy()
     df["educ_hi"] = (df.educ > 12).astype(int)
-    formula = "treat ~ black + educ_hi" if method in ("exact", "cem") else "treat ~ age + educ"
+    formula = (
+        "treat ~ black + educ_hi"
+        if method in ("exact", "cem")
+        else "treat ~ age + educ"
+    )
     m = MatchIt(df, method=method, estimand="ATC")
     m.fit(formula)
     md = m.matched_data
@@ -290,7 +305,9 @@ def test_ratio_weights_account_for_partial_matches(sim_data):
 # ==========================================
 def test_caliper_with_exact_uses_global_sd(sim_data):
     caliper = 0.25
-    m = MatchIt(sim_data, method="nearest", caliper=caliper, exact=["site"], random_state=1)
+    m = MatchIt(
+        sim_data, method="nearest", caliper=caliper, exact=["site"], random_state=1
+    )
     m.fit("treat ~ age + educ + black")
     threshold = caliper * m.distance_measure.std()
     pairs = m.matches()
@@ -334,14 +351,16 @@ def test_cbps_warm_start_used(sim_data, monkeypatch):
     import pymatchit.distance as dist_mod
 
     captured = {}
-    real_minimize = dist_mod.minimize
+    real_solver = dist_mod.least_squares
 
     def spy(fun, x0, **kw):
         captured["x0"] = np.asarray(x0).copy()
-        return real_minimize(fun, x0, **kw)
+        return real_solver(fun, x0, **kw)
 
-    monkeypatch.setattr(dist_mod, "minimize", spy)
-    ps, _ = dist_mod.estimate_distance(sim_data, "treat ~ age + educ + black", method="cbps")
+    monkeypatch.setattr(dist_mod, "least_squares", spy)
+    ps, _ = dist_mod.estimate_distance(
+        sim_data, "treat ~ age + educ + black", method="cbps"
+    )
     assert captured["x0"].any(), "CBPS started from the all-zeros fallback"
     assert ((ps > 0) & (ps < 1)).all()
 

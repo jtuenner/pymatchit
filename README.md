@@ -1,5 +1,6 @@
 # pymatchit-causal: Propensity Score Matching in Python
 
+[![Tests](https://github.com/jtuenner/pymatchit/actions/workflows/test.yml/badge.svg)](https://github.com/jtuenner/pymatchit/actions/workflows/test.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17839522.svg)](https://doi.org/10.5281/zenodo.17839522)
 [![PyPI version](https://badge.fury.io/py/pymatchit-causal.svg)](https://badge.fury.io/py/pymatchit-causal)
 
@@ -16,7 +17,7 @@ If you are looking for **Propensity Score Matching** in Python, this library pro
 ## Features
 * **Matching Methods:** Nearest Neighbor, Optimal Matching, Exact, Subclassification, Coarsened Exact Matching (CEM), Full Matching, Genetic Matching, Cardinality Matching.
 * **Distance Metrics:** Logistic Regression (GLM), CBPS, Mahalanobis, Random Forest, GBM, Neural Networks, Decision Trees, AdaBoost, Lasso, Ridge, ElasticNet, or user-supplied propensity scores.
-* **Advanced Configurations:** Target `ATE` or `ATT`, discard units outside common support, combine Mahalanobis distance with a Propensity Score caliper (`mahvars`), and enforce exact matching on subsets (`exact`).
+* **Advanced Configurations:** Target `ATT`, `ATC`, or `ATE`, discard units outside common support, combine Mahalanobis distance with a Propensity Score caliper (`mahvars`), and enforce exact matching on subsets (`exact`).
 * **Diagnostics:** Cohesive diagnostic plots including visually aligned Love Plots, Jitter Plots, QQ Plots, and Summary Tables (SMD, Variance Ratios).
 * **Parity:** Designed to mirror the R `MatchIt` API (`matchit(formula, data, method=...)`).
 
@@ -131,12 +132,14 @@ class MatchIt(
     link: str = "logit",
     replace: bool = False,
     caliper: Union[float, Dict[str, float]] = None,
-    ratio: int = 1,
+    ratio: int = None,
     estimand: str = "ATT",
     exact: Union[str, List[str]] = None,
+    antiexact: Union[str, List[str]] = None,
+    mahvars: Union[str, List[str]] = None,
     subclass: int = 6,
     discard: str = "none",
-    m_order: str = "largest",
+    m_order: str = None,
     cutpoints: Dict = None,
     distance_options: Dict = None,
     random_state: int = None
@@ -150,10 +153,32 @@ class MatchIt(
 | **`data`** | `pd.DataFrame` | *Required* | The input dataset containing treatment, outcome, and covariates. |
 | **`method`** | `str` | `"nearest"` | The matching algorithm to use. <br>• **`nearest`**: Nearest Neighbor (Greedy) matching. <br>• **`optimal`**: Optimal matching. <br>• **`exact`**: Exact matching. <br>• **`subclass`**: Subclassification (Stratification). <br>• **`cem`**: Coarsened Exact Matching. <br>• **`full`**: Full Matching. <br>• **`genetic`**: Genetic Matching. <br>• **`cardinality`**: Cardinality Matching. |
 | **`distance`** | `str` | `"glm"` | The method used to estimate propensity scores or distance. Options include `glm`, `cbps`, `mahalanobis`, or ML methods (`randomforest`, `gbm`, `neuralnet`, `decisiontree`, `adaboost`, `lasso`, `ridge`, `elasticnet`). You may also pass a `numpy` array or `pandas` Series of pre-computed scores. |
-| **`link`** | `str` | `"logit"` | The link function for the distance measure. |
+| **`link`** | `str` | `"logit"` | The scale of the estimated distance measure, as in R `MatchIt`. A plain link (`logit`) matches on the predicted probability; a `linear.` prefix (`linear.logit`) matches on the linear predictor. `glm` accepts `logit`, `probit`, `cloglog`, and `cauchit`; other estimators accept `logit` and `linear.logit`, except `randomforest`, `decisiontree`, and `neuralnet`, which only provide probabilities. |
 | **`replace`** | `bool` | `False` | Whether to match with replacement. |
-| **`caliper`** | `float`/`dict` | `None` | The maximum allowed distance between matches. |
-| **`ratio`** | `int` | `1` | The number of control units to match to each treated unit. |
+| **`caliper`** | `float`/`dict` | `None` | The maximum allowed distance between matches: a float in standard deviations of the distance measure, or a dict adding covariate limits, e.g. `{"distance": 0.1, "age": 2}`. |
+| **`ratio`** | `int` | `None` | The number of control units to match to each treated unit (1 if not set). For `cardinality`, a whole number requests cardinality matching with that ratio; leaving it unset requests profile matching, which keeps the whole treated group. |
+| **`estimand`** | `str` | `"ATT"` | `ATT`, `ATC`, or `ATE`. With `distance="cbps"`, the balance conditions follow the estimand. |
+| **`exact`** | `str`/`list` | `None` | Variables that matched units must share exactly. |
+| **`antiexact`** | `str`/`list` | `None` | Variables on which matched units must differ. |
+| **`mahvars`** | `str`/`list` | `None` | Variables for Mahalanobis distance matching, with the propensity score kept for calipers. In `genetic` matching, the variables of the weighted distance; in `cardinality` matching with a `ratio`, the variables the selected units are paired on. |
+| **`m_order`** | `str` | `None` | Order in which units are matched: `largest`, `smallest`, `random`, or `data`. Defaults to `largest` when a propensity score is available (`smallest` for `ATC`), else `data`. |
+
+#### Which options work with which method
+
+This follows R `MatchIt`. As in R, an option the chosen method cannot use is ignored with a warning, so you can switch `method` without rewriting the call. To turn these warnings into errors, use `warnings.simplefilter("error")`.
+
+| Option | `nearest` | `optimal` | `full` | `genetic` | `cardinality` | `subclass` / `exact` / `cem` |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `exact` | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| `antiexact` | ✓ | ✓ | ✓ | ✓ | – | – |
+| `mahvars` | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| `caliper` | ✓ | ✓ | ✓ | ✓ | – | – |
+| `replace` | ✓ | – | – | ✓ | – | – |
+| `m_order` | ✓ | – | – | ✓ | – | – |
+| `ratio` | ✓ | ✓ | – | ✓ | ✓ | – |
+| `estimand="ATE"` | – | – | ✓ | – | ✓ | ✓ |
+
+See the `MatchIt` docstring for the full list of parameters.
 
 ---
 
@@ -172,9 +197,10 @@ class MatchIt(
 6.  **Full Matching (`method='full'`)**:
     * Optimal subclassification that minimizes the globally calculated total distance within subclasses, where each subclass contains at least one treated and one control unit.
 7.  **Genetic Matching (`method='genetic'`)**:
-    * Uses a genetic/evolutionary algorithm to find optimal covariate weights that maximize balance between groups prior to matching.
+    * Uses a genetic/evolutionary algorithm to find optimal covariate weights that maximize balance between groups prior to matching. The distance is computed on the covariates plus the propensity score, or on `mahvars` if given; balance is always optimized on all covariates.
 8.  **Cardinality Matching (`method='cardinality'`)**:
     * Finds the largest possible subset of the data where treated and control groups satisfy user-specified balance constraints (on standardized mean differences).
+    * By default this is *profile matching*: the treated group is kept whole and the largest balanced control subset is selected. Setting `ratio` requests *cardinality matching*: the largest balanced sample with that many controls per treated unit. Adding `mahvars` then pairs the selected units.
 
 ---
 
@@ -182,7 +208,7 @@ class MatchIt(
 
 If you use `pymatchit-causal` in your research, please cite it:
 
-> Tünnermann, J. (2026). pymatchit: Propensity Score Matching and Causal Inference in Python (Version 0.5.0). Zenodo. https://doi.org/10.5281/zenodo.17839522
+> Tünnermann, J. (2026). pymatchit: Propensity Score Matching and Causal Inference in Python (Version 0.6.0). Zenodo. https://doi.org/10.5281/zenodo.17839522
 
 **BibTeX:**
 ```bibtex
@@ -191,7 +217,7 @@ If you use `pymatchit-causal` in your research, please cite it:
   title        = {pymatchit: Propensity Score Matching and Causal Inference in Python},
   year         = 2026,
   publisher    = {Zenodo},
-  version      = {0.5.0},
+  version      = {0.6.0},
   doi          = {10.5281/zenodo.17839522},
   url          = {https://doi.org/10.5281/zenodo.17839522}
 }

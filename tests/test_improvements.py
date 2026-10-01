@@ -59,7 +59,9 @@ def test_link_probit_matches_on_probability(sim_data):
     m_lin = MatchIt(sim_data, method="nearest", link="linear.probit", random_state=1)
     m_lin.fit("treat ~ age + educ")
     # Linear predictor differs from the probability and is unbounded
-    assert not np.allclose(m_lin.distance_measure.values, m_lin.propensity_scores.values)
+    assert not np.allclose(
+        m_lin.distance_measure.values, m_lin.propensity_scores.values
+    )
 
 
 def test_link_logit_ml_method_matches_on_probability(sim_data):
@@ -87,8 +89,9 @@ def test_cardinality_att_satisfies_balance(sim_data_many_controls):
     covs = ["age", "educ", "black"]
     t_mask = df.treat == 1
     c_sel = (df.treat == 0) & (m.weights > 0)
-    pooled = np.sqrt((df.loc[t_mask, covs].var() + df.loc[~t_mask, covs].var()) / 2)
-    smd = (df.loc[t_mask, covs].mean() - df.loc[c_sel, covs].mean()).abs() / pooled
+    # Standardized by the treated group's SD, as summary() does for the ATT
+    sd_t = df.loc[t_mask, covs].std()
+    smd = (df.loc[t_mask, covs].mean() - df.loc[c_sel, covs].mean()).abs() / sd_t
     assert (smd <= tol + 1e-6).all()
     # All treated retained with weight 1
     assert (m.weights[t_mask] == 1.0).all()

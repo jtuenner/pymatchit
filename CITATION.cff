@@ -8,8 +8,8 @@ authors:
     orcid: "https://orcid.org/0009-0006-9609-0611"
 identifiers:
   - type: doi
-    value: 10.5281/zenodo.17839552
-version: 0.5.0  # Make sure this matches your new release
-date-released: 2026-03-02
+    value: 10.5281/zenodo.17839522
+version: 0.6.0  # Make sure this matches your new release
+date-released: 2026-10-01
 url: "https://github.com/jtuenner/pymatchit"
 license: MIT

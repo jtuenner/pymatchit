@@ -1,19 +1,72 @@
 # File: src/pymatchit/distance.py
 
+import warnings
 import numpy as np
 import pandas as pd
 import patsy
 import statsmodels.formula.api as smf
 import statsmodels.api as sm
 from scipy.special import logit
-from scipy.optimize import minimize
+from scipy.optimize import least_squares
 from typing import Tuple, Optional, Dict, Any, Union
 
 # Scikit-learn imports
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier
+from sklearn.ensemble import (
+    RandomForestClassifier,
+    GradientBoostingClassifier,
+    AdaBoostClassifier,
+)
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.linear_model import LogisticRegression
+
+# Link functions available for distance='glm' (statsmodels class names)
+_GLM_LINKS = {
+    "logit": "Logit",
+    "probit": "Probit",
+    "cloglog": "CLogLog",
+    "cauchit": "Cauchy",
+}
+# Estimators that only return predicted probabilities. As in R MatchIt, no
+# linear predictor is available for them (tree-based probabilities can be
+# exactly 0 or 1, where the logit is undefined).
+_PROBABILITY_ONLY_METHODS = ("randomforest", "decisiontree", "neuralnet")
+
+
+def _parse_link(method: str, link: str) -> Tuple[str, bool]:
+    """
+    Splits `link` into the link function and whether the linear predictor is
+    requested ('linear.' prefix; 'linear' alone means 'linear.logit').
+    Raises for links that do not exist for the estimator; a linear link is
+    ignored, with a warning, by estimators that only return probabilities.
+    """
+    linear = link == "linear" or link.startswith("linear.")
+    if link == "linear":
+        base = "logit"
+    elif linear:
+        base = link[len("linear.") :]
+    else:
+        base = link
+
+    if method == "glm":
+        if base not in _GLM_LINKS:
+            raise ValueError(
+                f"link='{link}' is not recognized. Use one of {sorted(_GLM_LINKS)}, "
+                "optionally prefixed with 'linear.'."
+            )
+    elif base != "logit":
+        raise ValueError(
+            f"link='{link}' is only available for distance='glm', not '{method}'. "
+            "Use 'logit' or 'linear.logit'."
+        )
+    elif linear and method in _PROBABILITY_ONLY_METHODS:
+        warnings.warn(
+            f"link='{link}' is ignored for distance='{method}', which only "
+            "provides predicted probabilities; matching on the probability."
+        )
+        linear = False
+    return base, linear
+
 
 def estimate_distance(
     data: pd.DataFrame,
@@ -21,7 +74,8 @@ def estimate_distance(
     method: str = "glm",
     link: str = "logit",
     distance_options: Optional[Dict[str, Any]] = None,
-    random_state: Optional[int] = None
+    random_state: Optional[int] = None,
+    estimand: str = "ATT",
 ) -> Tuple[pd.Series, pd.Series]:
     """
     Estimates propensity scores using GLM, CBPS, or Machine Learning methods.
@@ -31,12 +85,16 @@ def estimate_distance(
         formula: R-style formula.
         method: 'glm', 'cbps', 'randomforest', 'decisiontree', 'neuralnet', 'gbm',
                 'adaboost', 'lasso', 'ridge', 'elasticnet'.
-        link: 'logit', 'probit', 'linear.logit', or 'linear.probit'.
-              As in R MatchIt, plain links match on the predicted probability;
-              'linear.'-prefixed links match on the linear predictor (logit/probit
-              of the probability). Probit links are only available for GLM.
+        link: As in R MatchIt, plain links match on the predicted probability;
+              'linear.'-prefixed links match on the linear predictor.
+              GLM accepts 'logit', 'probit', 'cloglog' and 'cauchit'. Other
+              estimators accept 'logit' and 'linear.logit'; random forests,
+              decision trees and neural networks only provide probabilities
+              and ignore a linear link with a warning.
         distance_options: kwargs passed to the sklearn estimator (e.g. {'n_estimators': 100}).
         random_state: Seed for reproducibility.
+        estimand: 'ATT', 'ATC' or 'ATE'. Used by CBPS, whose balance
+                  conditions depend on the target population.
 
     Returns:
         propensity_scores: Raw probabilities (0-1).
@@ -46,14 +104,15 @@ def estimate_distance(
     if distance_options is None:
         distance_options = {}
 
+    base_link, linear = _parse_link(method, link)
+
     # --- 1. GLM (Statsmodels) ---
     if method == "glm":
-        # Define Family/Link
-        family = sm.families.Binomial()
-        if link in ['probit', 'linear.probit']:
-            family = sm.families.Binomial(link=sm.families.links.Probit())
-        elif link in ['logit', 'linear.logit']:
-            family = sm.families.Binomial(link=sm.families.links.Logit())
+        # Define Family/Link (older statsmodels versions use lowercase names)
+        links = sm.families.links
+        link_name = _GLM_LINKS[base_link]
+        link_cls = getattr(links, link_name, None) or getattr(links, link_name.lower())
+        family = sm.families.Binomial(link=link_cls())
 
         try:
             model = smf.glm(formula=formula, data=data, family=family)
@@ -65,7 +124,7 @@ def estimate_distance(
 
         # As in R MatchIt: plain links match on the predicted probability,
         # 'linear.'-prefixed links match on the linear predictor
-        if link in ['linear.logit', 'linear.probit']:
+        if linear:
             distance_measure = result.predict(which="linear")
         else:
             distance_measure = propensity_scores
@@ -73,7 +132,7 @@ def estimate_distance(
     # --- 2. CBPS (Covariate Balancing Propensity Score) ---
     elif method == "cbps":
         propensity_scores, distance_measure = _estimate_cbps(
-            data, formula, link, random_state
+            data, formula, linear, random_state, estimand
         )
 
     # --- 3. Machine Learning (Scikit-Learn) ---
@@ -81,35 +140,50 @@ def estimate_distance(
         # Prepare Data using Patsy (Handles categorical variables/dummies automatically)
         try:
             # return_type='dataframe' ensures we get pandas Index alignment
-            y, X = patsy.dmatrices(formula, data, return_type='dataframe')
-            y = y.iloc[:, 0] # Flatten target to Series
+            y, X = patsy.dmatrices(formula, data, return_type="dataframe")
+            y = y.iloc[:, 0]  # Flatten target to Series
         except Exception as e:
             raise ValueError(f"Error creating design matrices from formula: {str(e)}")
 
         # Select Model
-        if method == 'randomforest':
-            model = RandomForestClassifier(random_state=random_state, **distance_options)
-        elif method == 'decisiontree':
-            model = DecisionTreeClassifier(random_state=random_state, **distance_options)
-        elif method == 'neuralnet':
+        if method == "randomforest":
+            model = RandomForestClassifier(
+                random_state=random_state, **distance_options
+            )
+        elif method == "decisiontree":
+            model = DecisionTreeClassifier(
+                random_state=random_state, **distance_options
+            )
+        elif method == "neuralnet":
             model = MLPClassifier(random_state=random_state, **distance_options)
-        elif method == 'gbm':
-            model = GradientBoostingClassifier(random_state=random_state, **distance_options)
-        elif method == 'adaboost':
+        elif method == "gbm":
+            model = GradientBoostingClassifier(
+                random_state=random_state, **distance_options
+            )
+        elif method == "adaboost":
             model = AdaBoostClassifier(random_state=random_state, **distance_options)
-        elif method == 'lasso':
+        elif method == "lasso":
             # Lasso is Logistic Regression with L1 penalty
             # Need liblinear or saga for l1
-            opts = {'penalty': 'l1', 'solver': 'liblinear', 'random_state': random_state}
+            opts = {
+                "penalty": "l1",
+                "solver": "liblinear",
+                "random_state": random_state,
+            }
             opts.update(distance_options)
             model = LogisticRegression(**opts)
-        elif method == 'ridge':
+        elif method == "ridge":
             # Ridge is Logistic Regression with L2 penalty
-            opts = {'penalty': 'l2', 'random_state': random_state}
+            opts = {"penalty": "l2", "random_state": random_state}
             opts.update(distance_options)
             model = LogisticRegression(**opts)
-        elif method == 'elasticnet':
-            opts = {'penalty': 'elasticnet', 'solver': 'saga', 'l1_ratio': 0.5, 'random_state': random_state}
+        elif method == "elasticnet":
+            opts = {
+                "penalty": "elasticnet",
+                "solver": "saga",
+                "l1_ratio": 0.5,
+                "random_state": random_state,
+            }
             opts.update(distance_options)
             model = LogisticRegression(**opts)
         else:
@@ -128,7 +202,7 @@ def estimate_distance(
 
         # Plain links match on the probability; only 'linear.logit' applies
         # the logit transform for ML methods
-        if link == 'linear.logit':
+        if linear:
             # Clip probabilities to avoid inf/nan in logit
             eps = 1e-9
             clipped_scores = np.clip(propensity_scores, eps, 1 - eps)
@@ -153,84 +227,91 @@ def estimate_distance(
 def _estimate_cbps(
     data: pd.DataFrame,
     formula: str,
-    link: str = "logit",
-    random_state: Optional[int] = None
+    linear: bool = False,
+    random_state: Optional[int] = None,
+    estimand: str = "ATT",
 ) -> Tuple[pd.Series, pd.Series]:
     """
-    Covariate Balancing Propensity Score (CBPS) estimation.
-    Jointly optimizes propensity score prediction and covariate balance
-    using a GMM-style approach.
-    
-    Implements the just-identified CBPS estimator from:
-    Imai & Ratkovic (2014) 'Covariate Balancing Propensity Score'.
+    Covariate Balancing Propensity Score (CBPS) estimation: the
+    just-identified estimator of Imai & Ratkovic (2014) 'Covariate
+    Balancing Propensity Score'.
+
+    A logistic propensity score model is fit by solving the covariate
+    balance conditions sum_i w_i(beta) x_i = 0 instead of the likelihood
+    score equations, so that the weights implied by the score balance the
+    covariate means exactly. The weights depend on the estimand, as in the
+    paper and R's CBPS package:
+
+    - ATE: w = (T - ps) / (ps (1 - ps)); both groups weighted to the full sample
+    - ATT: w = (T - ps) / (1 - ps); controls weighted to the treated group
+    - ATC: the mirror image of the ATT
     """
     try:
-        y, X = patsy.dmatrices(formula, data, return_type='dataframe')
-        y_arr = y.iloc[:, 0].values
-        X_arr = X.values
+        y, X = patsy.dmatrices(formula, data, return_type="dataframe")
+        y_arr = y.iloc[:, 0].values.astype(float)
+        X_arr = X.values.astype(float)
     except Exception as e:
         raise ValueError(f"Error creating design matrices from formula: {str(e)}")
 
     n, p = X_arr.shape
 
+    # Standardize the non-constant columns. This only reparametrizes the
+    # model (the fitted scores are unchanged) but puts the balance
+    # conditions on a common scale.
+    col_sd = X_arr.std(axis=0)
+    is_const = col_sd < 1e-12
+    center = np.where(is_const, 0.0, X_arr.mean(axis=0))
+    scale = np.where(is_const, 1.0, col_sd)
+    Xs = (X_arr - center) / scale
+
     def _sigmoid(z):
         z = np.clip(z, -500, 500)
         return 1.0 / (1.0 + np.exp(-z))
 
-    def _cbps_objective(beta):
-        """Combined likelihood + balance objective."""
-        linear_pred = X_arr @ beta
-        ps = _sigmoid(linear_pred)
-        ps_clipped = np.clip(ps, 1e-9, 1 - 1e-9)
+    def _balance_conditions(beta):
+        """Mean of w_i * x_i: zero when the weighted groups are balanced."""
+        ps = np.clip(_sigmoid(Xs @ beta), 1e-9, 1 - 1e-9)
+        if estimand == "ATT":
+            w = (y_arr - ps) / (1 - ps)
+        elif estimand == "ATC":
+            w = (y_arr - ps) / ps
+        else:
+            w = (y_arr - ps) / (ps * (1 - ps))
+        return Xs.T @ w / n
 
-        # Log-likelihood component
-        log_lik = np.mean(
-            y_arr * np.log(ps_clipped) + (1 - y_arr) * np.log(1 - ps_clipped)
-        )
-
-        # Balance component: weighted covariate means should equal overall means
-        # For treated: weight by 1/ps; for control: weight by 1/(1-ps)
-        weights_t = y_arr / ps_clipped
-        weights_c = (1 - y_arr) / (1 - ps_clipped)
-        
-        balance_loss = 0.0
-        for j in range(p):
-            weighted_mean_t = np.sum(weights_t * X_arr[:, j]) / np.sum(weights_t)
-            weighted_mean_c = np.sum(weights_c * X_arr[:, j]) / np.sum(weights_c)
-            balance_loss += (weighted_mean_t - weighted_mean_c) ** 2
-
-        # Combined: maximize likelihood, minimize balance loss
-        # Negative because we minimize
-        return -log_lik + balance_loss
-
-    # Initialize with logistic regression coefficients. X_arr already contains
+    # Start from the logistic regression coefficients. Xs already contains
     # the patsy intercept column, so no separate sklearn intercept is fit.
     try:
         from sklearn.linear_model import LogisticRegression as LR
-        init_model = LR(random_state=random_state, max_iter=1000, penalty=None,
-                        solver='lbfgs', fit_intercept=False)
-        init_model.fit(X_arr, y_arr)
+
+        init_model = LR(
+            random_state=random_state,
+            max_iter=1000,
+            penalty=None,
+            solver="lbfgs",
+            fit_intercept=False,
+        )
+        init_model.fit(Xs, y_arr)
         beta_init = init_model.coef_.flatten()
         if len(beta_init) != p:
             beta_init = np.zeros(p)
     except Exception:
         beta_init = np.zeros(p)
 
-    # Optimize
-    result = minimize(
-        _cbps_objective,
-        beta_init,
-        method='L-BFGS-B',
-        options={'maxiter': 1000, 'ftol': 1e-8}
-    )
+    result = least_squares(_balance_conditions, beta_init, xtol=1e-12, ftol=1e-12)
 
-    beta_hat = result.x
-    linear_pred = X_arr @ beta_hat
-    ps = _sigmoid(linear_pred)
+    if np.max(np.abs(result.fun)) > 1e-6:
+        warnings.warn(
+            "CBPS could not satisfy the covariate balance conditions exactly "
+            f"(largest remaining imbalance: {np.max(np.abs(result.fun)):.2g}). "
+            "This usually means the groups barely overlap on some covariate."
+        )
+
+    ps = _sigmoid(Xs @ result.x)
 
     propensity_scores = pd.Series(ps, index=data.index)
 
-    if link == 'linear.logit':
+    if linear:
         eps = 1e-9
         clipped = np.clip(ps, eps, 1 - eps)
         distance_measure = pd.Series(logit(clipped), index=data.index)

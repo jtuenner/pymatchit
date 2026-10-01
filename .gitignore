@@ -24,3 +24,6 @@ htmlcov/
 # IDE settings (VS Code / PyCharm)
 .vscode/
 .idea/
+
+# OS files
+**/.DS_Store

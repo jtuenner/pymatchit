@@ -5,16 +5,17 @@ import pandas as pd
 from typing import Dict, Optional
 from scipy.stats import ks_2samp
 
+
 def compute_weighted_stats(x: np.ndarray, weights: np.ndarray) -> dict:
     """
     Computes weighted mean and variance.
     """
     if len(x) == 0 or np.sum(weights) == 0:
-        return {'mean': np.nan, 'var': np.nan, 'std': np.nan}
+        return {"mean": np.nan, "var": np.nan, "std": np.nan}
 
     V1 = np.sum(weights)
     V2 = np.sum(weights**2)
-    
+
     # Weighted Mean
     weighted_mean = np.average(x, weights=weights)
 
@@ -22,20 +23,17 @@ def compute_weighted_stats(x: np.ndarray, weights: np.ndarray) -> dict:
     if V1**2 <= V2:
         weighted_var = 0.0
     else:
-        numerator = np.sum(weights * (x - weighted_mean)**2)
+        numerator = np.sum(weights * (x - weighted_mean) ** 2)
         weighted_var = numerator / (V1 - (V2 / V1))
 
-    return {
-        'mean': weighted_mean,
-        'var': weighted_var,
-        'std': np.sqrt(weighted_var)
-    }
+    return {"mean": weighted_mean, "var": weighted_var, "std": np.sqrt(weighted_var)}
+
 
 def covariate_balance(
-    data: pd.DataFrame, 
-    covariates: list, 
-    treatment_col: str, 
-    weights: Optional[pd.Series] = None
+    data: pd.DataFrame,
+    covariates: list,
+    treatment_col: str,
+    weights: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Calculates raw stats (Means, Variance Ratios) for the provided data/weights.
@@ -44,15 +42,15 @@ def covariate_balance(
         weights = pd.Series(1.0, index=data.index)
 
     rows = []
-    
-    treated_mask = (data[treatment_col] == 1)
-    control_mask = (data[treatment_col] == 0)
+
+    treated_mask = data[treatment_col] == 1
+    control_mask = data[treatment_col] == 0
 
     for cov in covariates:
         # Extract data
         x_treat = data.loc[treated_mask, cov].values
         w_treat = weights.loc[treated_mask].values
-        
+
         x_ctrl = data.loc[control_mask, cov].values
         w_ctrl = weights.loc[control_mask].values
 
@@ -61,20 +59,23 @@ def covariate_balance(
         stats_c = compute_weighted_stats(x_ctrl, w_ctrl)
 
         # Raw Difference
-        mean_diff = stats_t['mean'] - stats_c['mean']
-        
-        # Variance Ratio
-        var_ratio = stats_t['var'] / stats_c['var'] if stats_c['var'] > 1e-9 else np.nan
+        mean_diff = stats_t["mean"] - stats_c["mean"]
 
-        rows.append({
-            'Covariate': cov,
-            'Means Treated': stats_t['mean'],
-            'Means Control': stats_c['mean'],
-            'Mean Diff': mean_diff,
-            'Var Ratio': var_ratio,
-        })
-        
-    return pd.DataFrame(rows).set_index('Covariate')
+        # Variance Ratio
+        var_ratio = stats_t["var"] / stats_c["var"] if stats_c["var"] > 1e-9 else np.nan
+
+        rows.append(
+            {
+                "Covariate": cov,
+                "Means Treated": stats_t["mean"],
+                "Means Control": stats_c["mean"],
+                "Mean Diff": mean_diff,
+                "Var Ratio": var_ratio,
+            }
+        )
+
+    return pd.DataFrame(rows).set_index("Covariate")
+
 
 def create_summary_table(
     original_data: pd.DataFrame,
@@ -82,7 +83,7 @@ def create_summary_table(
     covariates: list,
     treatment_col: str,
     weights: pd.Series,
-    estimand: str = "ATT"
+    estimand: str = "ATT",
 ) -> pd.DataFrame:
     """
     Generates the full 'summary(out)' table.
@@ -91,10 +92,10 @@ def create_summary_table(
     unmatched_balance = covariate_balance(
         original_data, covariates, treatment_col, weights=None
     )
-    
+
     # 2. Calculate Matched Balance (Matched Data, weights=matched_weights)
     weights_aligned = weights.reindex(original_data.index).fillna(0)
-    
+
     matched_balance = covariate_balance(
         original_data.copy(), covariates, treatment_col, weights=weights_aligned
     )
@@ -103,7 +104,7 @@ def create_summary_table(
     std_factors = {}
     treated_original = original_data[original_data[treatment_col] == 1]
     control_original = original_data[original_data[treatment_col] == 0]
-    
+
     for cov in covariates:
         if estimand == "ATT":
             std_factors[cov] = treated_original[cov].std()
@@ -117,89 +118,101 @@ def create_summary_table(
             std_factors[cov] = treated_original[cov].std()
 
     # 4. Compute SMD
-    unmatched_balance['Std. Mean Diff.'] = [
-        row['Mean Diff'] / std_factors[idx] if std_factors[idx] > 0 else np.nan
+    unmatched_balance["Std. Mean Diff."] = [
+        row["Mean Diff"] / std_factors[idx] if std_factors[idx] > 0 else np.nan
         for idx, row in unmatched_balance.iterrows()
     ]
-    
-    matched_balance['Std. Mean Diff.'] = [
-        row['Mean Diff'] / std_factors[idx] if std_factors[idx] > 0 else np.nan
+
+    matched_balance["Std. Mean Diff."] = [
+        row["Mean Diff"] / std_factors[idx] if std_factors[idx] > 0 else np.nan
         for idx, row in matched_balance.iterrows()
     ]
 
     return unmatched_balance, matched_balance
 
+
 def compute_sample_size_table(
-    data: pd.DataFrame, 
-    treatment_col: str, 
-    weights: pd.Series, 
-    mask_kept: Optional[pd.Series] = None
+    data: pd.DataFrame,
+    treatment_col: str,
+    weights: pd.Series,
+    mask_kept: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Computes the 'Sample Sizes' table (All, Matched, Unmatched, Discarded).
     """
     counts = {
-        'All': {'Control': 0, 'Treated': 0},
-        'Matched': {'Control': 0, 'Treated': 0},
-        'Unmatched': {'Control': 0, 'Treated': 0},
-        'Discarded': {'Control': 0, 'Treated': 0},
+        "All": {"Control": 0, "Treated": 0},
+        "Matched": {"Control": 0, "Treated": 0},
+        "Unmatched": {"Control": 0, "Treated": 0},
+        "Discarded": {"Control": 0, "Treated": 0},
     }
-    
-    treat_mask = (data[treatment_col] == 1)
-    control_mask = (data[treatment_col] == 0)
-    
-    counts['All']['Treated'] = treat_mask.sum()
-    counts['All']['Control'] = control_mask.sum()
-    
+
+    treat_mask = data[treatment_col] == 1
+    control_mask = data[treatment_col] == 0
+
+    counts["All"]["Treated"] = treat_mask.sum()
+    counts["All"]["Control"] = control_mask.sum()
+
     if mask_kept is not None:
         discarded_mask = ~mask_kept
-        counts['Discarded']['Treated'] = (discarded_mask & treat_mask).sum()
-        counts['Discarded']['Control'] = (discarded_mask & control_mask).sum()
-    
-    matched_mask = (weights > 0)
-    counts['Matched']['Treated'] = (matched_mask & treat_mask).sum()
-    counts['Matched']['Control'] = (matched_mask & control_mask).sum()
-    
-    counts['Unmatched']['Treated'] = counts['All']['Treated'] - counts['Discarded']['Treated'] - counts['Matched']['Treated']
-    counts['Unmatched']['Control'] = counts['All']['Control'] - counts['Discarded']['Control'] - counts['Matched']['Control']
-    
+        counts["Discarded"]["Treated"] = (discarded_mask & treat_mask).sum()
+        counts["Discarded"]["Control"] = (discarded_mask & control_mask).sum()
+
+    matched_mask = weights > 0
+    counts["Matched"]["Treated"] = (matched_mask & treat_mask).sum()
+    counts["Matched"]["Control"] = (matched_mask & control_mask).sum()
+
+    counts["Unmatched"]["Treated"] = (
+        counts["All"]["Treated"]
+        - counts["Discarded"]["Treated"]
+        - counts["Matched"]["Treated"]
+    )
+    counts["Unmatched"]["Control"] = (
+        counts["All"]["Control"]
+        - counts["Discarded"]["Control"]
+        - counts["Matched"]["Control"]
+    )
+
     return pd.DataFrame(counts).T
 
 
-def compute_effective_sample_size(weights: pd.Series, treatment: pd.Series) -> Dict[str, float]:
+def compute_effective_sample_size(
+    weights: pd.Series, treatment: pd.Series
+) -> Dict[str, float]:
     """
     Computes the Effective Sample Size (ESS) for weighted samples.
-    
+
     ESS = (sum(w))^2 / sum(w^2)
-    
+
     This measures the equivalent number of unweighted observations.
     A lower ESS relative to the actual sample size indicates that the
     weighting scheme reduces precision.
-    
+
     Args:
         weights: Matching weights.
         treatment: Treatment indicator (0/1).
-        
+
     Returns:
         Dictionary with ESS for treated, control, and total.
     """
+
     def _ess(w):
         w = w[w > 0]
         if len(w) == 0:
             return 0.0
-        return (w.sum())**2 / (w**2).sum()
-    
+        return (w.sum()) ** 2 / (w**2).sum()
+
     treated_mask = treatment == 1
     control_mask = treatment == 0
-    
+
     ess_treated = _ess(weights[treated_mask])
     ess_control = _ess(weights[control_mask])
     ess_total = _ess(weights)
-    
+
     return {
-        'Treated': round(ess_treated, 1),
-        'Control': round(ess_control, 1),
-        'Total': round(ess_total, 1)
+        "Treated": round(ess_treated, 1),
+        "Control": round(ess_control, 1),
+        "Total": round(ess_total, 1),
     }
 
 
@@ -238,10 +251,7 @@ def _ks_pvalue_from_ess(ks: float, ess_t: float, ess_c: float) -> float:
 
 
 def compute_ks_statistics(
-    data: pd.DataFrame,
-    covariates: list,
-    treatment_col: str,
-    weights: pd.Series
+    data: pd.DataFrame, covariates: list, treatment_col: str, weights: pd.Series
 ) -> pd.DataFrame:
     """
     Computes the Kolmogorov-Smirnov (KS) statistic for each covariate
@@ -287,18 +297,24 @@ def compute_ks_statistics(
 
         ks_matched = weighted_ks_statistic(x_t_m, w_t_m, x_c_m, w_c_m)
         if not np.isnan(ks_matched):
-            ess_t = (w_t_m.sum()) ** 2 / (w_t_m ** 2).sum()
-            ess_c = (w_c_m.sum()) ** 2 / (w_c_m ** 2).sum()
+            ess_t = (w_t_m.sum()) ** 2 / (w_t_m**2).sum()
+            ess_c = (w_c_m.sum()) ** 2 / (w_c_m**2).sum()
             p_matched = _ks_pvalue_from_ess(ks_matched, ess_t, ess_c)
         else:
             p_matched = np.nan
 
-        rows.append({
-            'Covariate': cov,
-            'KS (Raw)': round(ks_raw, 4),
-            'p-value (Raw)': round(p_raw, 4),
-            'KS (Matched)': round(ks_matched, 4) if not np.isnan(ks_matched) else np.nan,
-            'p-value (Matched)': round(p_matched, 4) if not np.isnan(p_matched) else np.nan,
-        })
+        rows.append(
+            {
+                "Covariate": cov,
+                "KS (Raw)": round(ks_raw, 4),
+                "p-value (Raw)": round(p_raw, 4),
+                "KS (Matched)": (
+                    round(ks_matched, 4) if not np.isnan(ks_matched) else np.nan
+                ),
+                "p-value (Matched)": (
+                    round(p_matched, 4) if not np.isnan(p_matched) else np.nan
+                ),
+            }
+        )
 
-    return pd.DataFrame(rows).set_index('Covariate')
+    return pd.DataFrame(rows).set_index("Covariate")
