@@ -287,6 +287,26 @@ class MatchIt:
                 "It is currently available for 'nearest' and 'optimal' matching."
             )
 
+        # Options a method cannot honour are rejected rather than silently ignored
+        if self.exact is not None and self.method not in ("nearest", "optimal", "full"):
+            raise NotImplementedError(
+                f"exact is not supported for method='{self.method}'. "
+                "It is currently available for 'nearest', 'optimal', and 'full' matching."
+            )
+
+        if self.caliper is not None and self.method not in ("nearest", "optimal", "full", "genetic"):
+            raise ValueError(
+                f"caliper is not used by method='{self.method}'. "
+                "It is available for 'nearest', 'optimal', 'full', and 'genetic' matching."
+            )
+
+        if self.replace and self.method not in ("nearest", "genetic"):
+            import warnings
+            warnings.warn(
+                f"replace=True has no effect for method='{self.method}'; "
+                "it is only used by 'nearest' and 'genetic' matching."
+            )
+
         if self.mahvars is not None:
             if self.method not in ("nearest", "optimal", "full"):
                 raise NotImplementedError(

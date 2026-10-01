@@ -46,6 +46,12 @@ def estimate_distance(
     if distance_options is None:
         distance_options = {}
 
+    if method != "glm" and link in ('probit', 'linear.probit'):
+        raise ValueError(
+            f"link='{link}' is only available for distance='glm', not '{method}'. "
+            "Use 'logit' or 'linear.logit'."
+        )
+
     # --- 1. GLM (Statsmodels) ---
     if method == "glm":
         # Define Family/Link

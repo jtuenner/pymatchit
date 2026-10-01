@@ -1,5 +1,6 @@
 # File: src/pymatchit/matchers.py
 
+import warnings
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
@@ -25,6 +26,19 @@ def _resolve_mahalanobis_covariates(covariates: pd.DataFrame, mahvars: Optional[
             raise ValueError(f"mahvars variable '{v}' not found among model covariates.")
         cols.extend(hits)
     return covariates[cols].select_dtypes(include=[np.number])
+
+
+def _mahalanobis_vi(num_covs: pd.DataFrame) -> np.ndarray:
+    """Inverse covariance matrix for Mahalanobis distance. Falls back to the
+    identity (unscaled Euclidean distance), with a warning, if it cannot be computed."""
+    try:
+        return pinv(num_covs.cov().values)
+    except Exception as e:
+        warnings.warn(
+            f"Could not invert the covariance matrix for Mahalanobis distance ({e}); "
+            "falling back to unscaled Euclidean distance."
+        )
+        return np.eye(num_covs.shape[1])
 
 
 def _antiexact_violations(anti_t: np.ndarray, anti_c: np.ndarray) -> np.ndarray:
@@ -159,11 +173,7 @@ class NearestNeighborMatcher(BaseMatcher):
             X_treated = num_covs[treated_mask].values
             X_control = num_covs[control_mask].values
 
-            try:
-                cov_matrix = num_covs.cov()
-                VI = pinv(cov_matrix.values)
-            except:
-                VI = np.eye(num_covs.shape[1])
+            VI = _mahalanobis_vi(num_covs)
 
             metric = 'mahalanobis'
             metric_params = {'VI': VI}
@@ -274,23 +284,36 @@ class NearestNeighborMatcher(BaseMatcher):
         nn.fit(X_control)
         dists, neighbors = nn.kneighbors(X_treated, n_neighbors=n_neighbors_to_fetch)
 
-        for i in sort_order:
-            t_idx = treated_indices[i]
-            found = []
+        # With ratio > 1, matching proceeds in rounds (as in R MatchIt): every
+        # unit gets its first match before any unit gets a second, so scarce
+        # controls are not used up by the units that happen to come first.
+        # next_pos[i] is where unit i resumes scanning its neighbor list;
+        # candidates skipped earlier stay unavailable or invalid.
+        next_pos = np.zeros(len(X_treated), dtype=int)
+        exhausted = np.zeros(len(X_treated), dtype=bool)
 
-            for dist, local_pos in zip(dists[i], neighbors[i]):
-                if len(found) >= self.ratio: break
-                if dist > threshold: break
-                if not available_mask[local_pos]: continue
+        for _ in range(self.ratio):
+            for i in sort_order:
+                if exhausted[i]: continue
+                t_idx = treated_indices[i]
+                matched = False
 
-                if self._violates_pair_constraints(i, local_pos, covs_treated, covs_control, cov_thresholds, anti_treated, anti_control):
-                    continue
+                for j in range(next_pos[i], n_neighbors_to_fetch):
+                    if dists[i, j] > threshold: break
+                    local_pos = neighbors[i, j]
+                    if not available_mask[local_pos]: continue
 
-                found.append(control_indices[local_pos])
-                available_mask[local_pos] = False
+                    if self._violates_pair_constraints(i, local_pos, covs_treated, covs_control, cov_thresholds, anti_treated, anti_control):
+                        continue
 
-            if found:
-                matches[t_idx] = found
+                    matches.setdefault(t_idx, []).append(control_indices[local_pos])
+                    available_mask[local_pos] = False
+                    next_pos[i] = j + 1
+                    matched = True
+                    break
+
+                if not matched:
+                    exhausted[i] = True
         return matches
 
 
@@ -384,10 +407,7 @@ class OptimalMatcher(BaseMatcher):
             num_covs = _resolve_mahalanobis_covariates(covariates, self.mahvars)
             X_t = num_covs[treated_mask].values
             X_c = num_covs[control_mask].values
-            try:
-                VI = pinv(num_covs.cov().values)
-            except:
-                VI = np.eye(num_covs.shape[1])
+            VI = _mahalanobis_vi(num_covs)
             dist_matrix = cdist(X_t, X_c, metric='mahalanobis', VI=VI)
 
             if global_caliper is not None:
@@ -635,6 +655,8 @@ class FullMatcher(BaseMatcher):
         all_weights = pd.Series(0.0, index=treatment.index)
         all_subclasses = pd.Series(pd.NA, index=treatment.index)
         subclass_offset = 0
+        # Caliper width is defined on the full sample's distance SD, not per stratum
+        dist_std = distance_measure.std() if distance_measure is not None else None
 
         for _, group_indices in grouped.groups.items():
             local_treat = treatment.loc[group_indices]
@@ -644,7 +666,7 @@ class FullMatcher(BaseMatcher):
             local_dist = distance_measure.loc[group_indices] if distance_measure is not None else None
             local_covs = covariates.loc[group_indices] if covariates is not None else None
 
-            _, w, sc = self._match_global(local_treat, local_dist, local_covs, estimand)
+            _, w, sc = self._match_global(local_treat, local_dist, local_covs, estimand, dist_std=dist_std)
 
             all_weights.update(w[w > 0])
             # Offset subclass IDs to keep them unique across strata
@@ -656,7 +678,7 @@ class FullMatcher(BaseMatcher):
 
         return {}, all_weights, all_subclasses
 
-    def _match_global(self, treatment, distance_measure, covariates, estimand):
+    def _match_global(self, treatment, distance_measure, covariates, estimand, dist_std=None):
         treated_mask = treatment == 1
         control_mask = treatment == 0
         treated_indices = treatment[treated_mask].index.to_numpy()
@@ -677,10 +699,7 @@ class FullMatcher(BaseMatcher):
             num_covs = _resolve_mahalanobis_covariates(covariates, self.mahvars)
             X_t = num_covs[treated_mask].values
             X_c = num_covs[control_mask].values
-            try:
-                VI = pinv(num_covs.cov().values)
-            except Exception:
-                VI = np.eye(num_covs.shape[1])
+            VI = _mahalanobis_vi(num_covs)
             dist_matrix = cdist(X_t, X_c, metric='mahalanobis', VI=VI)
         else:
             if distance_measure is None:
@@ -694,15 +713,28 @@ class FullMatcher(BaseMatcher):
         if self.caliper is not None:
             if isinstance(self.caliper, dict):
                 global_cal = self.caliper.get('distance', None)
+                cov_calipers = {k: v for k, v in self.caliper.items() if k != 'distance'}
             else:
                 global_cal = self.caliper
+                cov_calipers = {}
 
-            if global_cal is not None and distance_measure is not None:
-                threshold = global_cal * distance_measure.std()
+            if global_cal is not None:
+                if distance_measure is None: raise ValueError("Caliper requires 1D distance measure.")
+                if dist_std is None:
+                    dist_std = distance_measure.std()
+                threshold = global_cal * dist_std
                 ps_t = distance_measure[treated_mask].values.reshape(-1, 1)
                 ps_c = distance_measure[control_mask].values.reshape(-1, 1)
                 ps_dist = cdist(ps_t, ps_c, metric='euclidean')
-                feasible = ps_dist <= threshold
+                feasible &= ps_dist <= threshold
+
+            # Covariate-specific calipers
+            for name, limit in cov_calipers.items():
+                if covariates is None or name not in covariates.columns:
+                    raise ValueError(f"Caliper variable '{name}' not found in data.")
+                v_t = covariates.loc[treated_mask, name].values.reshape(-1, 1)
+                v_c = covariates.loc[control_mask, name].values.reshape(-1, 1)
+                feasible &= np.abs(v_t - v_c.T) <= limit
 
         clusters = self._build_clusters(dist_matrix, feasible, n_t, n_c)
 
@@ -946,16 +978,29 @@ class GeneticMatcher(BaseMatcher):
             dist_c_vals = distance_measure[control_mask].values
 
         # Parse caliper
-        global_caliper_threshold = None
+        cov_calipers = {}
         if isinstance(self.caliper, dict):
             global_cal = self.caliper.get('distance', None)
+            cov_calipers = {k: v for k, v in self.caliper.items() if k != 'distance'}
         elif self.caliper is not None:
             global_cal = self.caliper
         else:
             global_cal = None
 
+        # allowed[i, j]: treated i and control j satisfy every caliper
+        # (None when no caliper applies)
+        allowed = None
         if global_cal is not None and distance_measure is not None:
-            global_caliper_threshold = global_cal * distance_measure.std()
+            threshold = global_cal * distance_measure.std()
+            allowed = np.abs(dist_t_vals[:, None] - dist_c_vals[None, :]) <= threshold
+
+        for name, limit in cov_calipers.items():
+            if name not in covariates.columns:
+                raise ValueError(f"Caliper variable '{name}' not found in data.")
+            v_t = covariates.loc[treated_mask, name].values
+            v_c = covariates.loc[control_mask, name].values
+            within = np.abs(v_t[:, None] - v_c[None, :]) <= limit
+            allowed = within if allowed is None else allowed & within
 
         rng = np.random.RandomState(self.random_state)
 
@@ -976,10 +1021,8 @@ class GeneticMatcher(BaseMatcher):
             for i in range(len(X_t_w)):
                 for j in range(min(self.ratio, dists.shape[1])):
                     # Apply caliper if needed
-                    if global_caliper_threshold is not None and dist_t_vals is not None:
-                        ps_diff = abs(dist_t_vals[i] - dist_c_vals[neighbor_indices[i, j]])
-                        if ps_diff > global_caliper_threshold:
-                            continue
+                    if allowed is not None and not allowed[i, neighbor_indices[i, j]]:
+                        continue
                     matched_control_indices.add(neighbor_indices[i, j])
 
             if len(matched_control_indices) == 0:
@@ -1049,7 +1092,7 @@ class GeneticMatcher(BaseMatcher):
 
         # Without replacement (or with a caliper), the nearest candidates may
         # be taken or invalid, so all controls must be considered
-        if self.replace and global_caliper_threshold is None:
+        if self.replace and allowed is None:
             k = max(min(len(X_c_final), self.ratio), 1)
         else:
             k = len(X_c_final)
@@ -1071,10 +1114,8 @@ class GeneticMatcher(BaseMatcher):
                     continue
 
                 # Apply caliper
-                if global_caliper_threshold is not None and dist_t_vals is not None:
-                    ps_diff = abs(dist_t_vals[i] - dist_c_vals[local_pos])
-                    if ps_diff > global_caliper_threshold:
-                        continue
+                if allowed is not None and not allowed[i, local_pos]:
+                    continue
 
                 found.append(control_indices[local_pos])
                 if not self.replace:
