@@ -89,8 +89,9 @@ def test_cardinality_att_satisfies_balance(sim_data_many_controls):
     covs = ["age", "educ", "black"]
     t_mask = df.treat == 1
     c_sel = (df.treat == 0) & (m.weights > 0)
-    pooled = np.sqrt((df.loc[t_mask, covs].var() + df.loc[~t_mask, covs].var()) / 2)
-    smd = (df.loc[t_mask, covs].mean() - df.loc[c_sel, covs].mean()).abs() / pooled
+    # Standardized by the treated group's SD, as summary() does for the ATT
+    sd_t = df.loc[t_mask, covs].std()
+    smd = (df.loc[t_mask, covs].mean() - df.loc[c_sel, covs].mean()).abs() / sd_t
     assert (smd <= tol + 1e-6).all()
     # All treated retained with weight 1
     assert (m.weights[t_mask] == 1.0).all()

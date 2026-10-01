@@ -53,6 +53,78 @@ def _antiexact_violations(anti_t: np.ndarray, anti_c: np.ndarray) -> np.ndarray:
     return violations
 
 
+def _resolve_m_order(m_order: Optional[str], has_scores: bool, estimand: str) -> str:
+    """
+    Resolves the matching order. As in R MatchIt, the default (None) is
+    'largest' when a propensity score is available ('smallest' for the ATC,
+    where the control group is focal) and 'data' otherwise.
+    """
+    if m_order is None:
+        if not has_scores:
+            return "data"
+        return "smallest" if estimand == "ATC" else "largest"
+    if m_order not in ("largest", "smallest", "random", "data"):
+        raise ValueError(
+            f"m_order must be 'largest', 'smallest', 'random' or 'data', got '{m_order}'."
+        )
+    if m_order in ("largest", "smallest") and not has_scores:
+        raise ValueError(
+            f"m_order='{m_order}' orders units by the propensity score, but none "
+            "is estimated with this distance. Use 'data' or 'random'."
+        )
+    return m_order
+
+
+def _matching_order(m_order: str, scores, n: int, rng) -> np.ndarray:
+    """Positions of the focal units in the order they are to be matched."""
+    if m_order == "largest":
+        return np.argsort(scores)[::-1]
+    if m_order == "smallest":
+        return np.argsort(scores)
+    if m_order == "random":
+        return rng.permutation(n)
+    return np.arange(n)
+
+
+def _greedy_match(D: np.ndarray, order, ratio: int, replace: bool):
+    """
+    Greedy nearest neighbor matching on a (focal x other) distance matrix in
+    which forbidden pairs are np.inf. Returns two aligned arrays of focal
+    and other positions, one entry per matched pair.
+
+    Without replacement, units are matched in `order` and in rounds: every
+    focal unit gets its first match before any gets a second.
+    """
+    n_f, n_o = D.shape
+    if replace:
+        k = min(ratio, n_o)
+        if k == 1:
+            nearest = D.argmin(axis=1)[:, None]
+        else:
+            nearest = np.argsort(D, axis=1, kind="stable")[:, :k]
+        f_pos = np.repeat(np.arange(n_f), k)
+        o_pos = nearest.ravel()
+        keep = np.isfinite(D[f_pos, o_pos])
+        return f_pos[keep], o_pos[keep]
+
+    used = np.zeros(n_o)  # np.inf once a unit is taken
+    exhausted = np.zeros(n_f, dtype=bool)
+    f_pos, o_pos = [], []
+    for _ in range(ratio):
+        for i in order:
+            if exhausted[i]:
+                continue
+            d = D[i] + used
+            j = d.argmin()
+            if not np.isfinite(d[j]):
+                exhausted[i] = True
+                continue
+            f_pos.append(i)
+            o_pos.append(j)
+            used[j] = np.inf
+    return np.asarray(f_pos, dtype=int), np.asarray(o_pos, dtype=int)
+
+
 class BaseMatcher(ABC):
     """
     Abstract Base Class for all matching algorithms.
@@ -121,7 +193,7 @@ class NearestNeighborMatcher(BaseMatcher):
         ratio: int = 1,
         replace: bool = False,
         caliper: Optional[Union[float, Dict[str, float]]] = None,
-        m_order: str = "largest",
+        m_order: Optional[str] = None,
         random_state: Optional[int] = None,
         mahalanobis: bool = False,
         mahvars: Optional[List[str]] = None,
@@ -278,6 +350,15 @@ class NearestNeighborMatcher(BaseMatcher):
             anti_treated = antiexact.loc[treated_mask].values
             anti_control = antiexact.loc[control_mask].values
 
+        # Units are matched in order of the propensity score when one is
+        # available, also when the matching itself is on a Mahalanobis distance
+        order_scores = (
+            distance_measure[treated_mask].values
+            if distance_measure is not None
+            else None
+        )
+        m_order = _resolve_m_order(self.m_order, order_scores is not None, estimand)
+
         if self.replace:
             matches = self._match_with_replacement(
                 X_treated,
@@ -307,6 +388,8 @@ class NearestNeighborMatcher(BaseMatcher):
                 cov_thresholds_mapped,
                 anti_treated,
                 anti_control,
+                m_order,
+                order_scores,
             )
 
         return self._build_result(matches, treatment.index)
@@ -410,27 +493,14 @@ class NearestNeighborMatcher(BaseMatcher):
         cov_thresholds,
         anti_treated=None,
         anti_control=None,
+        m_order="data",
+        order_scores=None,
     ):
         if len(X_control) == 0:
             return {}
 
-        if self.m_order == "largest":
-            sort_order = (
-                np.argsort(X_treated.flatten())[::-1]
-                if X_treated.shape[1] == 1
-                else np.arange(len(X_treated))
-            )
-        elif self.m_order == "smallest":
-            sort_order = (
-                np.argsort(X_treated.flatten())
-                if X_treated.shape[1] == 1
-                else np.arange(len(X_treated))
-            )
-        elif self.m_order == "random":
-            rng = np.random.RandomState(self.random_state)
-            sort_order = rng.permutation(len(X_treated))
-        else:
-            sort_order = np.arange(len(X_treated))
+        rng = np.random.RandomState(self.random_state)
+        sort_order = _matching_order(m_order, order_scores, len(X_treated), rng)
 
         matches = {}
         available_mask = np.ones(len(X_control), dtype=bool)
@@ -918,16 +988,25 @@ class FullMatcher(BaseMatcher):
         covariates=None,
         estimand="ATT",
         exact=None,
+        antiexact=None,
         **kwargs,
     ):
         if exact is not None:
             return self._match_stratified(
-                treatment, distance_measure, covariates, estimand, exact
+                treatment, distance_measure, covariates, estimand, exact, antiexact
             )
-        return self._match_global(treatment, distance_measure, covariates, estimand)
+        return self._match_global(
+            treatment, distance_measure, covariates, estimand, antiexact
+        )
 
     def _match_stratified(
-        self, treatment, distance_measure, covariates, estimand, exact_df
+        self,
+        treatment,
+        distance_measure,
+        covariates,
+        estimand,
+        exact_df,
+        antiexact=None,
     ):
         group_cols = list(exact_df.columns)
         grouped = exact_df.groupby(group_cols)
@@ -951,9 +1030,15 @@ class FullMatcher(BaseMatcher):
             local_covs = (
                 covariates.loc[group_indices] if covariates is not None else None
             )
+            local_anti = antiexact.loc[group_indices] if antiexact is not None else None
 
             _, w, sc = self._match_global(
-                local_treat, local_dist, local_covs, estimand, dist_std=dist_std
+                local_treat,
+                local_dist,
+                local_covs,
+                estimand,
+                local_anti,
+                dist_std=dist_std,
             )
 
             all_weights.update(w[w > 0])
@@ -967,7 +1052,13 @@ class FullMatcher(BaseMatcher):
         return {}, all_weights, all_subclasses
 
     def _match_global(
-        self, treatment, distance_measure, covariates, estimand, dist_std=None
+        self,
+        treatment,
+        distance_measure,
+        covariates,
+        estimand,
+        antiexact=None,
+        dist_std=None,
     ):
         treated_mask = treatment == 1
         control_mask = treatment == 0
@@ -998,8 +1089,13 @@ class FullMatcher(BaseMatcher):
             X_c = distance_measure[control_mask].values.reshape(-1, 1)
             dist_matrix = cdist(X_t, X_c, metric="euclidean")
 
-        # Caliper feasibility: pairs outside the caliper cannot share a subclass
+        # Feasibility: pairs outside a caliper, or sharing an antiexact value,
+        # cannot be in the same subclass
         feasible = np.ones((n_t, n_c), dtype=bool)
+        if antiexact is not None:
+            feasible &= ~_antiexact_violations(
+                antiexact.loc[treated_mask].values, antiexact.loc[control_mask].values
+            )
         if self.caliper is not None:
             if isinstance(self.caliper, dict):
                 global_cal = self.caliper.get("distance", None)
@@ -1093,7 +1189,8 @@ class FullMatcher(BaseMatcher):
             penalty = (D[F].max() + 1.0) * (n_rows + 1)
         else:
             warnings.warn(
-                "Full matching: no pair satisfies the caliper; all units unmatched."
+                "Full matching: no pair satisfies the caliper/antiexact "
+                "constraints; all units unmatched."
             )
             return []
 
@@ -1135,7 +1232,9 @@ class FullMatcher(BaseMatcher):
             clusters[cid]["rows"].append(r)
             cluster_of_row[r] = cid
 
-        # Attach remaining column units to their nearest feasible row's cluster
+        # Attach remaining column units to their nearest feasible row's cluster.
+        # The unit must be feasible with every row unit already in that
+        # cluster, so the constraints hold for all pairs within a subclass.
         remaining_cols = [c for c in range(n_cols) if c not in cluster_of_col]
         for c in remaining_cols:
             feas_rows = np.where(F[:, c])[0]
@@ -1145,6 +1244,8 @@ class FullMatcher(BaseMatcher):
             for r in sorted(feas_rows, key=lambda r: D[r, c]):
                 cl = clusters[cluster_of_row[r]]
                 if max_cols is not None and len(cl["cols"]) >= max_cols:
+                    continue
+                if not all(F[other, c] for other in cl["rows"]):
                     continue
                 cl["cols"].append(c)
                 break
@@ -1223,13 +1324,21 @@ class FullMatcher(BaseMatcher):
 class GeneticMatcher(BaseMatcher):
     """
     Implements Genetic Matching.
-    Uses a genetic/evolutionary algorithm to find optimal covariate weights
-    that maximize balance between treated and control groups when performing
-    nearest neighbor matching.
+    Nearest neighbor matching on a generalized Mahalanobis distance: every
+    matching variable is scaled by its standard deviation and given a
+    weight, and an evolutionary search picks the weights that give the best
+    covariate balance in the resulting matched sample.
+
+    As in R MatchIt, the covariates play separate roles. Balance is always
+    optimized on all covariates in the formula. The distance is computed on
+    `mahvars` if given; otherwise on the covariates plus the propensity
+    score (when one is estimated or supplied). `exact`, `antiexact` and
+    calipers restrict which pairs are allowed.
 
     Based on Diamond & Sekhon (2013) 'Genetic Matching for Estimating Causal
     Effects: A General Multivariate Matching Method for Achieving Balance in
-    Observational Studies'.
+    Observational Studies'. Unlike R's Matching::GenMatch, balance is scored
+    by standardized mean differences rather than p-values.
     """
 
     def __init__(
@@ -1241,12 +1350,16 @@ class GeneticMatcher(BaseMatcher):
         max_generations: int = 50,
         balance_metric: str = "smd_max",
         random_state: Optional[int] = None,
+        m_order: Optional[str] = None,
+        mahvars: Optional[List[str]] = None,
     ):
         super().__init__(ratio=ratio, replace=replace, random_state=random_state)
         self.caliper = caliper
         self.pop_size = pop_size
         self.max_generations = max_generations
         self.balance_metric = balance_metric
+        self.m_order = m_order
+        self.mahvars = mahvars
 
     def match(
         self,
@@ -1255,6 +1368,7 @@ class GeneticMatcher(BaseMatcher):
         covariates=None,
         estimand="ATT",
         exact=None,
+        antiexact=None,
         **kwargs,
     ):
         if covariates is None:
@@ -1274,13 +1388,17 @@ class GeneticMatcher(BaseMatcher):
         control_mask = treatment == 0
         treated_indices = treatment[treated_mask].index.to_numpy()
         control_indices = treatment[control_mask].index.to_numpy()
+        n_t = len(treated_indices)
+        n_c = len(control_indices)
 
-        n_covs = num_covs.shape[1]
-        X_t = num_covs[treated_mask].values
-        X_c = num_covs[control_mask].values
-
-        if len(treated_indices) == 0 or len(control_indices) == 0:
+        if n_t == 0 or n_c == 0:
             return self._build_result({}, treatment.index)
+
+        # Covariates whose balance is optimized: always the full formula
+        B_t = num_covs[treated_mask].values.astype(float)
+        B_c = num_covs[control_mask].values.astype(float)
+        std_t = B_t.std(axis=0)
+        std_t[std_t < 1e-9] = 1.0
 
         # Positional arrays of the distance measure (index labels cannot be
         # used as positions: they differ after discard or with custom indexes)
@@ -1288,6 +1406,22 @@ class GeneticMatcher(BaseMatcher):
         if distance_measure is not None:
             dist_t_vals = distance_measure[treated_mask].values
             dist_c_vals = distance_measure[control_mask].values
+
+        # Variables that enter the generalized Mahalanobis distance
+        if self.mahvars:
+            match_vars = _resolve_mahalanobis_covariates(
+                covariates, self.mahvars
+            ).values.astype(float)
+        else:
+            match_vars = num_covs.values.astype(float)
+            if distance_measure is not None:
+                match_vars = np.column_stack([match_vars, distance_measure.values])
+        scale = match_vars.std(axis=0)
+        scale[scale < 1e-9] = 1.0
+        Z = match_vars / scale
+        Z_t = Z[treated_mask.values]
+        Z_c = Z[control_mask.values]
+        n_dims = Z.shape[1]
 
         # Parse caliper
         cov_calipers = {}
@@ -1299,67 +1433,76 @@ class GeneticMatcher(BaseMatcher):
         else:
             global_cal = None
 
-        # allowed[i, j]: treated i and control j satisfy every caliper
-        # (None when no caliper applies)
+        # allowed[i, j]: treated i and control j may be paired (None when
+        # nothing restricts the pairing)
         allowed = None
-        if global_cal is not None and distance_measure is not None:
+
+        def restrict(ok):
+            nonlocal allowed
+            allowed = ok if allowed is None else allowed & ok
+
+        if global_cal is not None:
+            if distance_measure is None:
+                raise ValueError("Caliper requires 1D distance measure.")
             threshold = global_cal * distance_measure.std()
-            allowed = np.abs(dist_t_vals[:, None] - dist_c_vals[None, :]) <= threshold
+            restrict(np.abs(dist_t_vals[:, None] - dist_c_vals[None, :]) <= threshold)
 
         for name, limit in cov_calipers.items():
             if name not in covariates.columns:
                 raise ValueError(f"Caliper variable '{name}' not found in data.")
             v_t = covariates.loc[treated_mask, name].values
             v_c = covariates.loc[control_mask, name].values
-            within = np.abs(v_t[:, None] - v_c[None, :]) <= limit
-            allowed = within if allowed is None else allowed & within
+            restrict(np.abs(v_t[:, None] - v_c[None, :]) <= limit)
+
+        if exact is not None:
+            strata = exact.groupby(list(exact.columns), sort=False).ngroup()
+            s_t = strata[treated_mask].values
+            s_c = strata[control_mask].values
+            restrict(s_t[:, None] == s_c[None, :])
+
+        if antiexact is not None:
+            restrict(
+                ~_antiexact_violations(
+                    antiexact.loc[treated_mask].values,
+                    antiexact.loc[control_mask].values,
+                )
+            )
 
         rng = np.random.RandomState(self.random_state)
+        m_order = _resolve_m_order(self.m_order, dist_t_vals is not None, estimand)
+        order = _matching_order(m_order, dist_t_vals, n_t, rng)
+
+        def match_positions(weight_vector):
+            """Nearest neighbor matching under the given variable weights.
+            Returns positional (treated, control) pairs."""
+            sw = np.sqrt(np.abs(weight_vector))
+            D = cdist(Z_t * sw, Z_c * sw, metric="euclidean")
+            if allowed is not None:
+                D[~allowed] = np.inf
+            return _greedy_match(D, order, self.ratio, self.replace)
 
         def evaluate_weights(weight_vector):
-            """Perform NN matching with given weights and return balance score."""
-            W = np.diag(np.abs(weight_vector))
-            X_t_w = X_t @ W
-            X_c_w = X_c @ W
-
-            # K-NN matching
-            k = min(len(X_c_w), self.ratio)
-            nn = NearestNeighbors(n_neighbors=k, metric="euclidean", algorithm="auto")
-            nn.fit(X_c_w)
-            dists, neighbor_indices = nn.kneighbors(X_t_w)
-
-            # Build quick matches
-            matched_control_indices = set()
-            for i in range(len(X_t_w)):
-                for j in range(min(self.ratio, dists.shape[1])):
-                    # Apply caliper if needed
-                    if allowed is not None and not allowed[i, neighbor_indices[i, j]]:
-                        continue
-                    matched_control_indices.add(neighbor_indices[i, j])
-
-            if len(matched_control_indices) == 0:
+            """Balance of the matched sample these weights produce (lower is better)."""
+            t_pos, c_pos = match_positions(weight_vector)
+            if len(t_pos) == 0:
                 return 1e6
 
-            # Compute balance: max absolute SMD across covariates
-            c_idx = np.array(list(matched_control_indices))
-            matched_c = X_c[c_idx]
-            mean_t = X_t.mean(axis=0)
-            mean_c = matched_c.mean(axis=0)
-            std_t = X_t.std(axis=0)
-            std_t[std_t < 1e-9] = 1.0
+            # Same weights as the final result: each control gets 1/k_i per
+            # match, where k_i is the number of matches of its treated unit
+            k = np.bincount(t_pos, minlength=n_t)
+            c_w = np.bincount(c_pos, weights=1.0 / k[t_pos], minlength=n_c)
+            mean_t = B_t[k > 0].mean(axis=0)
+            mean_c = c_w @ B_c / c_w.sum()
 
             smds = np.abs(mean_t - mean_c) / std_t
 
-            if self.balance_metric == "smd_max":
-                return np.max(smds)
-            elif self.balance_metric == "smd_mean":
+            if self.balance_metric == "smd_mean":
                 return np.mean(smds)
-            else:
-                return np.max(smds)
+            return np.max(smds)
 
         # --- Differential Evolution (simplified) ---
         # Initialize population
-        population = rng.uniform(0.1, 2.0, size=(self.pop_size, n_covs))
+        population = rng.uniform(0.1, 2.0, size=(self.pop_size, n_dims))
         fitness = np.array([evaluate_weights(ind) for ind in population])
 
         best_idx = np.argmin(fitness)
@@ -1370,6 +1513,10 @@ class GeneticMatcher(BaseMatcher):
         crossover_prob = 0.7
 
         for gen in range(self.max_generations):
+            # Early stopping if balance is very good
+            if best_fitness < 0.01:
+                break
+
             for i in range(self.pop_size):
                 # Mutation: DE/rand/1
                 candidates = [j for j in range(self.pop_size) if j != i]
@@ -1380,9 +1527,9 @@ class GeneticMatcher(BaseMatcher):
                 mutant = np.clip(mutant, 0.01, 10.0)
 
                 # Crossover
-                cross_mask = rng.rand(n_covs) < crossover_prob
+                cross_mask = rng.rand(n_dims) < crossover_prob
                 if not cross_mask.any():
-                    cross_mask[rng.randint(n_covs)] = True
+                    cross_mask[rng.randint(n_dims)] = True
                 trial = np.where(cross_mask, mutant, population[i])
 
                 # Selection
@@ -1395,65 +1542,41 @@ class GeneticMatcher(BaseMatcher):
                         best_weights = trial.copy()
                         best_fitness = trial_fitness
 
-            # Early stopping if balance is very good
-            if best_fitness < 0.01:
-                break
-
         # --- Final matching with optimized weights ---
-        W_final = np.diag(np.abs(best_weights))
-        X_t_final = X_t @ W_final
-        X_c_final = X_c @ W_final
-
-        # Without replacement (or with a caliper), the nearest candidates may
-        # be taken or invalid, so all controls must be considered
-        if self.replace and allowed is None:
-            k = max(min(len(X_c_final), self.ratio), 1)
-        else:
-            k = len(X_c_final)
-        nn = NearestNeighbors(n_neighbors=k, metric="euclidean", algorithm="auto")
-        nn.fit(X_c_final)
-        dists, neighbor_indices = nn.kneighbors(X_t_final)
-
+        t_pos, c_pos = match_positions(best_weights)
         matches = {}
-        available_mask = np.ones(len(X_c_final), dtype=bool)
-
-        for i in range(len(treated_indices)):
-            t_idx = treated_indices[i]
-            found = []
-            for j in range(dists.shape[1]):
-                if len(found) >= self.ratio:
-                    break
-                local_pos = neighbor_indices[i, j]
-                if not self.replace and not available_mask[local_pos]:
-                    continue
-
-                # Apply caliper
-                if allowed is not None and not allowed[i, local_pos]:
-                    continue
-
-                found.append(control_indices[local_pos])
-                if not self.replace:
-                    available_mask[local_pos] = False
-
-            if found:
-                matches[t_idx] = found
+        for i, j in zip(t_pos, c_pos):
+            matches.setdefault(treated_indices[i], []).append(control_indices[j])
 
         return self._build_result(matches, treatment.index)
 
 
 class CardinalityMatcher(BaseMatcher):
     """
-    Implements Cardinality Matching via subset selection.
-    Finds the largest possible subset of the data where treated and control
-    groups satisfy user-specified balance constraints (on standardized mean
-    differences).
+    Implements cardinality and profile matching via subset selection.
+    Finds the largest possible subset of the data in which the groups
+    satisfy user-specified balance constraints (on standardized mean
+    differences). Following R MatchIt, `ratio` selects the variant:
 
-    Solves the subset-selection problem exactly as a mixed-integer linear
-    program (scipy.optimize.milp, scipy >= 1.9) using the linearized balance
-    constraints of Zubizarreta, Paredes & Rosenbaum (2014). Falls back to a
-    greedy removal heuristic — which does not guarantee maximality or that
-    the balance constraints are met — when the MILP solver is unavailable
-    or fails.
+    - ratio=None (default), profile matching (Cohn & Zubizarreta 2022): for
+      ATT/ATC the focal group is kept intact and the largest balanced subset
+      of the other group is selected; for ATE each group's subset is
+      balanced to the full sample.
+    - ratio=k, cardinality matching (Zubizarreta, Paredes & Rosenbaum 2014):
+      the largest sample with k non-focal units per focal unit whose groups
+      are balanced. Focal units can be dropped, so the result no longer
+      targets the ATT/ATC exactly.
+
+    With `exact`, the optimization is solved separately within each stratum.
+    With `mahvars` (and a whole-number ratio), the selected units are then
+    optimally paired on the Mahalanobis distance of those variables, which
+    leaves balance unchanged ("matching for balance, pairing for
+    heterogeneity").
+
+    Solved exactly as a mixed-integer linear program (scipy.optimize.milp,
+    scipy >= 1.9). Profile matching falls back to a greedy removal heuristic,
+    which guarantees neither maximality nor the balance constraints, when
+    the solver is unavailable or fails.
     """
 
     def __init__(
@@ -1462,19 +1585,26 @@ class CardinalityMatcher(BaseMatcher):
         std_tols: float = 0.1,
         random_state: Optional[int] = None,
         solver_time_limit: float = 60.0,
+        ratio: Optional[int] = None,
+        mahvars: Optional[List[str]] = None,
     ):
         """
         Args:
             tols: Covariate-specific balance tolerances (absolute mean diff).
                   e.g., {'age': 2.0, 'educ': 0.5}
             std_tols: Default tolerance on standardized mean difference for
-                      all covariates. Default is 0.1 (10% of a SD).
+                      all covariates. Default is 0.1 (10% of a SD). The
+                      standardization factor is the one used by summary():
+                      the focal group's SD for ATT/ATC, the pooled SD for ATE.
             solver_time_limit: Time limit (seconds) for the MILP solver.
+            ratio: Non-focal units per focal unit; None for profile matching.
+            mahvars: Variables to pair the selected units on (needs `ratio`).
         """
-        super().__init__(ratio=1, replace=False, random_state=random_state)
+        super().__init__(ratio=ratio, replace=False, random_state=random_state)
         self.tols = tols if tols is not None else {}
         self.std_tols = std_tols
         self.solver_time_limit = solver_time_limit
+        self.mahvars = mahvars
 
     @staticmethod
     def _milp_select(X, target, eps, time_limit):
@@ -1526,6 +1656,97 @@ class CardinalityMatcher(BaseMatcher):
         return sel
 
     @staticmethod
+    def _milp_fixed_ratio(X_f, X_o, eps, ratio, time_limit, target=None):
+        """
+        Largest subsets of the focal rows X_f and the other rows X_o with
+        exactly `ratio` other units per focal unit.
+
+        With target=None (cardinality matching) the two subsets are balanced
+        against each other: |mean(X_f sel) - mean(X_o sel)| <= eps, which is
+        linear given the fixed ratio. Otherwise (profile matching for the
+        ATE) each subset's mean is within eps of `target`.
+        Returns (focal mask, other mask), or None if no solution was found.
+        """
+        try:
+            from scipy.optimize import milp, LinearConstraint, Bounds
+        except ImportError:
+            return None
+
+        n_f, n_o = len(X_f), len(X_o)
+        p = X_f.shape[1]
+        # Work on standardized columns: equivalent constraints, better conditioned
+        both = np.vstack([X_f, X_o])
+        center = both.mean(axis=0) if target is None else np.asarray(target)
+        scale = both.std(axis=0)
+        scale[scale < 1e-9] = 1.0
+        A_f = (X_f - center) / scale
+        A_o = (X_o - center) / scale
+        e = eps / scale
+        zeros_f, zeros_o = np.zeros(n_f), np.zeros(n_o)
+
+        rows, lb, ub = [], [], []
+        # Group sizes: |other| = ratio * |focal|, and at least one focal unit
+        rows.append(np.concatenate([-ratio * np.ones(n_f), np.ones(n_o)]))
+        lb.append(0.0)
+        ub.append(0.0)
+        rows.append(np.concatenate([np.ones(n_f), zeros_o]))
+        lb.append(1.0)
+        ub.append(n_f)
+        for k in range(p):
+            if target is None:
+                lower = [
+                    np.concatenate([A_f[:, k] - e[k], -A_o[:, k] / ratio]),
+                ]
+                upper = [
+                    np.concatenate([A_f[:, k] + e[k], -A_o[:, k] / ratio]),
+                ]
+            else:
+                lower = [
+                    np.concatenate([A_f[:, k] - e[k], zeros_o]),
+                    np.concatenate([zeros_f, A_o[:, k] - e[k]]),
+                ]
+                upper = [
+                    np.concatenate([A_f[:, k] + e[k], zeros_o]),
+                    np.concatenate([zeros_f, A_o[:, k] + e[k]]),
+                ]
+            for row in lower:
+                rows.append(row)
+                lb.append(-np.inf)
+                ub.append(0.0)
+            for row in upper:
+                rows.append(row)
+                lb.append(0.0)
+                ub.append(np.inf)
+
+        try:
+            res = milp(
+                c=-np.ones(n_f + n_o),
+                constraints=LinearConstraint(np.vstack(rows), lb, ub),
+                integrality=np.ones(n_f + n_o),
+                bounds=Bounds(0, 1),
+                options={"time_limit": time_limit},
+            )
+        except Exception:
+            return None
+
+        if res.x is None:
+            return None
+        sel_f = res.x[:n_f] > 0.5
+        sel_o = res.x[n_f:] > 0.5
+        if sel_f.sum() == 0 or sel_o.sum() != ratio * sel_f.sum():
+            return None
+        # A time-limit incumbent could be infeasible; verify before accepting
+        mean_f = X_f[sel_f].mean(axis=0)
+        mean_o = X_o[sel_o].mean(axis=0)
+        if target is None:
+            ok = np.all(np.abs(mean_f - mean_o) <= eps + 1e-8)
+        else:
+            ok = np.all(np.abs(mean_f - target) <= eps + 1e-8) and np.all(
+                np.abs(mean_o - target) <= eps + 1e-8
+            )
+        return (sel_f, sel_o) if ok else None
+
+    @staticmethod
     def _greedy_select(X, target, eps):
         """Fallback: iteratively drop the unit most responsible for the
         worst balance violation against the fixed target."""
@@ -1547,8 +1768,6 @@ class CardinalityMatcher(BaseMatcher):
         return sel
 
     def _select(self, X, target, eps):
-        import warnings
-
         sel = self._milp_select(X, target, eps, self.solver_time_limit)
         if sel is None:
             warnings.warn(
@@ -1558,6 +1777,31 @@ class CardinalityMatcher(BaseMatcher):
             )
             sel = self._greedy_select(X, target, eps)
         return sel
+
+    def _select_stratum(self, X_f, X_o, eps, estimand):
+        """Selects units within one stratum. Returns (focal mask, other mask),
+        or None when a fixed-ratio problem has no solution."""
+        if self.ratio is not None:
+            target = None
+            if estimand == "ATE":
+                target = np.vstack([X_f, X_o]).mean(axis=0)
+                eps = eps / 2
+            return self._milp_fixed_ratio(
+                X_f, X_o, eps, self.ratio, self.solver_time_limit, target=target
+            )
+
+        if estimand == "ATE":
+            # Each group's subset is balanced to the full-sample means within
+            # eps/2, which guarantees the SMD between the selected groups is
+            # within the tolerance
+            overall = np.vstack([X_f, X_o]).mean(axis=0)
+            return (
+                self._select(X_f, overall, eps / 2),
+                self._select(X_o, overall, eps / 2),
+            )
+
+        # Keep the whole focal group; largest other subset balanced to its means
+        return np.ones(len(X_f), dtype=bool), self._select(X_o, X_f.mean(axis=0), eps)
 
     def match(
         self,
@@ -1570,91 +1814,114 @@ class CardinalityMatcher(BaseMatcher):
     ):
         if covariates is None:
             raise ValueError("Covariates are required for Cardinality Matching.")
-
-        num_covs = covariates.select_dtypes(include=[np.number])
-        treated_mask = treatment == 1
-        control_mask = treatment == 0
-        treated_indices = treatment[treated_mask].index.to_numpy()
-        control_indices = treatment[control_mask].index.to_numpy()
-
-        n_t = len(treated_indices)
-        n_c = len(control_indices)
-
-        if n_t == 0 or n_c == 0:
-            return (
-                {},
-                pd.Series(0.0, index=treatment.index),
-                pd.Series(pd.NA, index=treatment.index),
+        if estimand not in ("ATT", "ATC", "ATE"):
+            raise ValueError(
+                f"Estimand '{estimand}' not supported for Cardinality Matching."
             )
-
-        cov_names = list(num_covs.columns)
-        X_t = num_covs[treated_mask].values
-        X_c = num_covs[control_mask].values
-
-        # Compute pooled standard deviations for standardization
-        pooled_std = np.sqrt((X_t.var(axis=0) + X_c.var(axis=0)) / 2)
-        pooled_std[pooled_std < 1e-9] = 1.0
-
-        # For each covariate, determine the tolerance
-        tolerances = np.full(len(cov_names), self.std_tols)
-        for i, name in enumerate(cov_names):
-            if name in self.tols:
-                # User specified absolute tolerance; convert to standardized
-                tolerances[i] = self.tols[name] / pooled_std[i]
-
-        # Tolerances in raw covariate units
-        eps_raw = tolerances * pooled_std
+        if self.mahvars and self.ratio is None:
+            raise ValueError(
+                "mahvars can only be used with cardinality matching when ratio "
+                "is a whole number: pairing needs a fixed number of matches per unit."
+            )
 
         weights = pd.Series(0.0, index=treatment.index)
         subclasses = pd.Series(pd.NA, index=treatment.index)
 
-        if estimand == "ATT":
-            # Keep all treated; largest control subset balanced to treated means
-            sel_c = self._select(X_c, X_t.mean(axis=0), eps_raw)
-            selected_controls = control_indices[sel_c]
+        num_covs = covariates.select_dtypes(include=[np.number])
+        X = num_covs.values.astype(float)
+        is_treated = (treatment == 1).values
+        if is_treated.sum() == 0 or (~is_treated).sum() == 0:
+            return {}, weights, subclasses
 
-            weights.loc[treated_indices] = 1.0
-            if sel_c.sum() > 0:
-                weights.loc[selected_controls] = n_t / sel_c.sum()
+        # The focal group defines the ratio and, for ATT/ATC, the target
+        is_focal = ~is_treated if estimand == "ATC" else is_treated
 
-            subclasses.loc[treated_indices] = 1
-            subclasses.loc[selected_controls] = 1
-
-        elif estimand == "ATC":
-            # Mirror of ATT: keep all controls, select treated subset
-            sel_t = self._select(X_t, X_c.mean(axis=0), eps_raw)
-            selected_treated = treated_indices[sel_t]
-
-            weights.loc[control_indices] = 1.0
-            if sel_t.sum() > 0:
-                weights.loc[selected_treated] = n_c / sel_t.sum()
-
-            subclasses.loc[control_indices] = 1
-            subclasses.loc[selected_treated] = 1
-
-        elif estimand == "ATE":
-            # Template matching: each group's subset is balanced to the
-            # full-sample means within eps/2, which guarantees the SMD
-            # between the selected groups is within the tolerance
-            overall = np.vstack([X_t, X_c]).mean(axis=0)
-            sel_t = self._select(X_t, overall, eps_raw / 2)
-            sel_c = self._select(X_c, overall, eps_raw / 2)
-            selected_treated = treated_indices[sel_t]
-            selected_controls = control_indices[sel_c]
-
-            n_sel_t = int(sel_t.sum())
-            n_sel_c = int(sel_c.sum())
-            if n_sel_t > 0 and n_sel_c > 0:
-                n_total = n_sel_t + n_sel_c
-                weights.loc[selected_treated] = n_total / n_sel_t
-                weights.loc[selected_controls] = n_total / n_sel_c
-
-            subclasses.loc[selected_treated] = 1
-            subclasses.loc[selected_controls] = 1
-        else:
-            raise ValueError(
-                f"Estimand '{estimand}' not supported for Cardinality Matching."
+        # Standardization factor, as in summary(): the focal group's SD for
+        # ATT/ATC, the pooled SD for ATE
+        if estimand == "ATE":
+            sd = np.sqrt(
+                (X[is_treated].var(axis=0, ddof=1) + X[~is_treated].var(axis=0, ddof=1))
+                / 2
             )
+        else:
+            sd = X[is_focal].std(axis=0, ddof=1)
+        sd = np.where(np.isnan(sd) | (sd < 1e-9), 1.0, sd)
 
-        # No pairwise matches for cardinality (subset selection)
-        return {}, weights, subclasses
+        # Tolerances in raw covariate units; `tols` entries are absolute
+        eps_raw = self.std_tols * sd
+        for i, name in enumerate(num_covs.columns):
+            if name in self.tols:
+                eps_raw[i] = self.tols[name]
+
+        if exact is not None:
+            strata = [
+                treatment.index.get_indexer(idx)
+                for idx in exact.groupby(list(exact.columns)).groups.values()
+            ]
+        else:
+            strata = [np.arange(len(treatment))]
+
+        if self.mahvars:
+            mah_covs = _resolve_mahalanobis_covariates(covariates, self.mahvars)
+            mah_X = mah_covs.values.astype(float)
+            VI = _mahalanobis_vi(mah_covs)
+
+        labels = treatment.index.to_numpy()
+        matches = {}
+        n_failed = 0
+        group_id = 1
+
+        for pos in strata:
+            f_pos = pos[is_focal[pos]]
+            o_pos = pos[~is_focal[pos]]
+            if len(f_pos) == 0 or len(o_pos) == 0:
+                continue
+
+            selected = self._select_stratum(X[f_pos], X[o_pos], eps_raw, estimand)
+            if selected is None:
+                n_failed += 1
+                continue
+            sel_f, sel_o = f_pos[selected[0]], o_pos[selected[1]]
+            if len(sel_f) == 0 or len(sel_o) == 0:
+                continue
+
+            # Both groups' weights sum to the same total within a stratum
+            if estimand == "ATE" and self.ratio is None:
+                n_total = len(sel_f) + len(sel_o)
+                weights.iloc[sel_f] = n_total / len(sel_f)
+                weights.iloc[sel_o] = n_total / len(sel_o)
+            else:
+                weights.iloc[sel_f] = 1.0
+                weights.iloc[sel_o] = len(sel_f) / len(sel_o)
+
+            if not self.mahvars:
+                subclasses.iloc[np.concatenate([sel_f, sel_o])] = group_id
+                group_id += 1
+                continue
+
+            # Pair the selected units: optimal `ratio`:1 assignment on the
+            # Mahalanobis distance of mahvars
+            D = cdist(mah_X[sel_f], mah_X[sel_o], metric="mahalanobis", VI=VI)
+            rows, cols = linear_sum_assignment(np.repeat(D, self.ratio, axis=0))
+            for r in range(len(sel_f)):
+                partners = sel_o[cols[rows // self.ratio == r]]
+                matches[labels[sel_f[r]]] = list(labels[partners])
+                subclasses.iloc[np.concatenate([[sel_f[r]], partners])] = group_id
+                group_id += 1
+
+        if n_failed:
+            message = (
+                "Cardinality matching found no balanced sample with "
+                f"ratio={self.ratio}"
+                + (
+                    f" in {n_failed} of {len(strata)} strata"
+                    if exact is not None
+                    else ""
+                )
+                + ". Try larger tolerances (std_tols/tols) or a different ratio."
+            )
+            if not (weights > 0).any():
+                raise ValueError(message)
+            warnings.warn(message)
+
+        return matches, weights, subclasses

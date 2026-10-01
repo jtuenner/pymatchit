@@ -132,12 +132,14 @@ class MatchIt(
     link: str = "logit",
     replace: bool = False,
     caliper: Union[float, Dict[str, float]] = None,
-    ratio: int = 1,
+    ratio: int = None,
     estimand: str = "ATT",
     exact: Union[str, List[str]] = None,
+    antiexact: Union[str, List[str]] = None,
+    mahvars: Union[str, List[str]] = None,
     subclass: int = 6,
     discard: str = "none",
-    m_order: str = "largest",
+    m_order: str = None,
     cutpoints: Dict = None,
     distance_options: Dict = None,
     random_state: int = None
@@ -151,14 +153,32 @@ class MatchIt(
 | **`data`** | `pd.DataFrame` | *Required* | The input dataset containing treatment, outcome, and covariates. |
 | **`method`** | `str` | `"nearest"` | The matching algorithm to use. <br>• **`nearest`**: Nearest Neighbor (Greedy) matching. <br>• **`optimal`**: Optimal matching. <br>• **`exact`**: Exact matching. <br>• **`subclass`**: Subclassification (Stratification). <br>• **`cem`**: Coarsened Exact Matching. <br>• **`full`**: Full Matching. <br>• **`genetic`**: Genetic Matching. <br>• **`cardinality`**: Cardinality Matching. |
 | **`distance`** | `str` | `"glm"` | The method used to estimate propensity scores or distance. Options include `glm`, `cbps`, `mahalanobis`, or ML methods (`randomforest`, `gbm`, `neuralnet`, `decisiontree`, `adaboost`, `lasso`, `ridge`, `elasticnet`). You may also pass a `numpy` array or `pandas` Series of pre-computed scores. |
-| **`link`** | `str` | `"logit"` | The scale of the estimated distance measure, as in R `MatchIt`. `logit` and `probit` match on the predicted probability; `linear.logit` and `linear.probit` match on the linear predictor. Probit links require `distance="glm"`. |
-| **`replace`** | `bool` | `False` | Whether to match with replacement (`nearest` and `genetic`). |
-| **`caliper`** | `float`/`dict` | `None` | The maximum allowed distance between matches: a float in standard deviations of the distance measure, or a dict adding covariate limits, e.g. `{"distance": 0.1, "age": 2}`. Supported by `nearest`, `optimal`, `full`, and `genetic`. |
-| **`ratio`** | `int` | `1` | The number of control units to match to each treated unit (`nearest`, `optimal`, `genetic`). |
-| **`estimand`** | `str` | `"ATT"` | `ATT`, `ATC`, or `ATE`. `ATE` is not available for `nearest`, `optimal`, or `genetic`. |
-| **`exact`** | `str`/`list` | `None` | Variables that matched units must share exactly. Supported by `nearest`, `optimal`, and `full`. |
+| **`link`** | `str` | `"logit"` | The scale of the estimated distance measure, as in R `MatchIt`. A plain link (`logit`) matches on the predicted probability; a `linear.` prefix (`linear.logit`) matches on the linear predictor. `glm` accepts `logit`, `probit`, `cloglog`, and `cauchit`; other estimators accept `logit` and `linear.logit`, except `randomforest`, `decisiontree`, and `neuralnet`, which only provide probabilities. |
+| **`replace`** | `bool` | `False` | Whether to match with replacement. |
+| **`caliper`** | `float`/`dict` | `None` | The maximum allowed distance between matches: a float in standard deviations of the distance measure, or a dict adding covariate limits, e.g. `{"distance": 0.1, "age": 2}`. |
+| **`ratio`** | `int` | `None` | The number of control units to match to each treated unit (1 if not set). For `cardinality`, a whole number requests cardinality matching with that ratio; leaving it unset requests profile matching, which keeps the whole treated group. |
+| **`estimand`** | `str` | `"ATT"` | `ATT`, `ATC`, or `ATE`. With `distance="cbps"`, the balance conditions follow the estimand. |
+| **`exact`** | `str`/`list` | `None` | Variables that matched units must share exactly. |
+| **`antiexact`** | `str`/`list` | `None` | Variables on which matched units must differ. |
+| **`mahvars`** | `str`/`list` | `None` | Variables for Mahalanobis distance matching, with the propensity score kept for calipers. In `genetic` matching, the variables of the weighted distance; in `cardinality` matching with a `ratio`, the variables the selected units are paired on. |
+| **`m_order`** | `str` | `None` | Order in which units are matched: `largest`, `smallest`, `random`, or `data`. Defaults to `largest` when a propensity score is available (`smallest` for `ATC`), else `data`. |
 
-Options that the chosen method cannot honour raise an error instead of being silently ignored. See the `MatchIt` docstring for the full list of parameters.
+#### Which options work with which method
+
+This follows R `MatchIt`. An option the chosen method cannot honour raises an error instead of being silently ignored.
+
+| Option | `nearest` | `optimal` | `full` | `genetic` | `cardinality` | `subclass` / `exact` / `cem` |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `exact` | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| `antiexact` | ✓ | ✓ | ✓ | ✓ | – | – |
+| `mahvars` | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| `caliper` | ✓ | ✓ | ✓ | ✓ | – | – |
+| `replace` | ✓ | – | – | ✓ | – | – |
+| `m_order` | ✓ | – | – | ✓ | – | – |
+| `ratio` | ✓ | ✓ | – | ✓ | ✓ | – |
+| `estimand="ATE"` | – | – | ✓ | – | ✓ | ✓ |
+
+See the `MatchIt` docstring for the full list of parameters.
 
 ---
 
@@ -177,9 +197,10 @@ Options that the chosen method cannot honour raise an error instead of being sil
 6.  **Full Matching (`method='full'`)**:
     * Optimal subclassification that minimizes the globally calculated total distance within subclasses, where each subclass contains at least one treated and one control unit.
 7.  **Genetic Matching (`method='genetic'`)**:
-    * Uses a genetic/evolutionary algorithm to find optimal covariate weights that maximize balance between groups prior to matching.
+    * Uses a genetic/evolutionary algorithm to find optimal covariate weights that maximize balance between groups prior to matching. The distance is computed on the covariates plus the propensity score, or on `mahvars` if given; balance is always optimized on all covariates.
 8.  **Cardinality Matching (`method='cardinality'`)**:
     * Finds the largest possible subset of the data where treated and control groups satisfy user-specified balance constraints (on standardized mean differences).
+    * By default this is *profile matching*: the treated group is kept whole and the largest balanced control subset is selected. Setting `ratio` requests *cardinality matching*: the largest balanced sample with that many controls per treated unit. Adding `mahvars` then pairs the selected units.
 
 ---
 

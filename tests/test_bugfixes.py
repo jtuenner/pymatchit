@@ -134,7 +134,7 @@ def test_antiexact_combined_with_exact(sim_data):
 
 def test_antiexact_unsupported_method_raises(sim_data):
     m = MatchIt(sim_data, method="cem", antiexact=["site"])
-    with pytest.raises(NotImplementedError, match="antiexact"):
+    with pytest.raises(ValueError, match="antiexact"):
         m.fit("treat ~ age + educ")
 
 
@@ -184,8 +184,8 @@ def test_mahvars_full_changes_weights(sim_data):
 
 
 def test_mahvars_unsupported_method_raises(sim_data):
-    m = MatchIt(sim_data, method="genetic", mahvars=["age"])
-    with pytest.raises(NotImplementedError, match="mahvars"):
+    m = MatchIt(sim_data, method="subclass", mahvars=["age"])
+    with pytest.raises(ValueError, match="mahvars"):
         m.fit("treat ~ age + educ")
 
 
@@ -351,13 +351,13 @@ def test_cbps_warm_start_used(sim_data, monkeypatch):
     import pymatchit.distance as dist_mod
 
     captured = {}
-    real_minimize = dist_mod.minimize
+    real_solver = dist_mod.least_squares
 
     def spy(fun, x0, **kw):
         captured["x0"] = np.asarray(x0).copy()
-        return real_minimize(fun, x0, **kw)
+        return real_solver(fun, x0, **kw)
 
-    monkeypatch.setattr(dist_mod, "minimize", spy)
+    monkeypatch.setattr(dist_mod, "least_squares", spy)
     ps, _ = dist_mod.estimate_distance(
         sim_data, "treat ~ age + educ + black", method="cbps"
     )

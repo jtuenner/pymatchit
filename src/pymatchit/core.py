@@ -22,6 +22,23 @@ from .matchers import (
 from .diagnostics import create_summary_table, compute_sample_size_table
 from .plotting import love_plot, propensity_plot, ecdf_plot, qq_plot, jitter_plot
 
+# Which matching methods can honour each option. This follows R MatchIt's
+# method documentation: an option used outside its row is one that R
+# ignores with a warning, and here it raises an error instead.
+_OPTION_SUPPORT = {
+    "exact": ("nearest", "optimal", "full", "genetic", "cardinality"),
+    "antiexact": ("nearest", "optimal", "full", "genetic"),
+    "mahvars": ("nearest", "optimal", "full", "genetic", "cardinality"),
+    "caliper": ("nearest", "optimal", "full", "genetic"),
+    "replace": ("nearest", "genetic"),
+    "m_order": ("nearest", "genetic"),
+    "ratio": ("nearest", "optimal", "genetic", "cardinality"),
+    "cutpoints": ("cem",),
+    "tols": ("cardinality",),
+    "min_controls_per_subclass": ("full",),
+    "max_controls_per_subclass": ("full",),
+}
+
 
 class MatchIt:
     """
@@ -37,14 +54,14 @@ class MatchIt:
         link: str = "logit",
         replace: bool = False,
         caliper: Optional[Union[float, Dict[str, float]]] = None,
-        ratio: int = 1,
+        ratio: Optional[int] = None,
         estimand: str = "ATT",
         subclass: int = 6,
         discard: str = "none",
         exact: Optional[Union[List[str], str]] = None,
         antiexact: Optional[Union[List[str], str]] = None,
-        m_order: str = "largest",
-        mahvars: Optional[List[str]] = None,
+        m_order: Optional[str] = None,
+        mahvars: Optional[Union[List[str], str]] = None,
         cutpoints: Optional[Dict] = None,
         # Cardinality matching options
         tols: Optional[Dict[str, float]] = None,
@@ -59,9 +76,22 @@ class MatchIt:
         random_state: Optional[int] = None,
     ):
         """
-        Options that the chosen method cannot honour raise an error when
-        ``.fit()`` is called, rather than being silently ignored (``replace``
-        only warns).
+        Which options each method supports follows R MatchIt. An option the
+        chosen method cannot honour raises an error when ``.fit()`` is called,
+        rather than being silently ignored:
+
+        ========== ======= ======= ==== ======= =========== ==================
+        option     nearest optimal full genetic cardinality subclass/exact/cem
+        ========== ======= ======= ==== ======= =========== ==================
+        exact      yes     yes     yes  yes     yes         no
+        antiexact  yes     yes     yes  yes     no          no
+        mahvars    yes     yes     yes  yes     yes         no
+        caliper    yes     yes     yes  yes     no          no
+        replace    yes     no      no   yes     no          no
+        m_order    yes     no      no   yes     no          no
+        ratio      yes     yes     no   yes     yes         no
+        ATE        no      no      yes  no      yes         yes
+        ========== ======= ======= ==== ======= =========== ==================
 
         Args:
             data (pd.DataFrame): Data containing the treatment indicator and all
@@ -77,17 +107,23 @@ class MatchIt:
                 with one pre-computed score per row of `data`; the values are
                 used as-is (they need not be probabilities, and `link` is not
                 applied). Default 'glm'.
-                Not used by exact, cem, genetic, or cardinality matching, which
-                work on the covariates directly.
+                Exact, cem, and cardinality matching work on the covariates
+                directly and do not match on it. Genetic matching adds the
+                propensity score to its matching variables unless
+                distance='mahalanobis' or `mahvars` is given. With
+                distance='cbps', the balance conditions follow `estimand`.
             link (str): Scale of the estimated distance measure, as in R MatchIt.
-                'logit' and 'probit' match on the predicted probability;
-                'linear.logit' and 'linear.probit' match on the linear predictor.
-                Calipers are in standard deviations of this measure, so the
-                choice changes what a given caliper means. Probit links are
-                only available for distance='glm'. Default 'logit'.
+                A plain link ('logit') matches on the predicted probability; a
+                'linear.' prefix ('linear.logit') matches on the linear
+                predictor. Calipers are in standard deviations of this measure,
+                so the choice changes what a given caliper means.
+                distance='glm' accepts 'logit', 'probit', 'cloglog', and
+                'cauchit'. Other estimators accept 'logit' and 'linear.logit',
+                except random forests, decision trees, and neural networks,
+                which only provide probabilities. Default 'logit'.
             replace (bool): Whether a control unit can be matched to more than
-                one treated unit. Used by nearest and genetic matching; has no
-                effect elsewhere (a warning is issued). Default False.
+                one treated unit. Supported by nearest and genetic matching.
+                Default False.
             caliper (float or dict): Maximum allowed difference between matched
                 units. A float is a width on the distance measure, in standard
                 deviations of that measure (computed on the full sample). A dict
@@ -96,9 +132,16 @@ class MatchIt:
                 Supported by nearest, optimal, full, and genetic matching.
                 Default None (no caliper).
             ratio (int): Number of control units to match to each treated unit.
-                Used by nearest, optimal, and genetic matching. Units may end up
-                with fewer matches when controls run out or a caliper binds.
-                Default 1.
+                Supported by nearest, optimal, and genetic matching, where the
+                default is 1; units may end up with fewer matches when controls
+                run out or a caliper binds, and nearest/genetic matching assign
+                matches in rounds so every unit gets a first match before any
+                gets a second.
+                For method='cardinality' it selects the variant: the default
+                (None) is profile matching, which keeps the whole focal group;
+                a whole number k is cardinality matching, the largest balanced
+                sample with k controls per treated unit, which may drop treated
+                units.
             estimand (str): Target estimand: 'ATT', 'ATC', or 'ATE'. For 'ATC'
                 the control group is the focal group: controls are matched to
                 treated units, and ``matches()`` is keyed by control unit.
@@ -111,18 +154,27 @@ class MatchIt:
                 'treated', 'control', or 'both'. Default 'none'.
             exact (str or list): Variable(s) on which matched units must have
                 IDENTICAL values, in addition to the distance-based matching.
-                Supported by nearest, optimal, and full matching. Default None.
+                Supported by nearest, optimal, full, genetic, and cardinality
+                matching (which solves each stratum separately). For exact,
+                cem, and subclass matching, put the variable in the formula
+                instead. Default None.
             antiexact (str or list): Variable(s) on which matched units must have
-                DIFFERENT values. Supported by nearest and optimal matching.
-                Default None.
-            m_order (str): Order in which units are matched in nearest neighbor
-                matching without replacement: 'largest' or 'smallest' (by
-                distance measure), 'random', or 'data' (row order).
-                Default 'largest'.
-            mahvars (list): Variables on which to compute a Mahalanobis distance
-                for matching, while the estimated distance measure is kept for
-                the caliper. Supported by nearest, optimal, and full matching;
-                cannot be combined with distance='mahalanobis'. Default None.
+                DIFFERENT values. Supported by nearest, optimal, full, and
+                genetic matching. Default None.
+            m_order (str): Order in which units are matched without replacement
+                in nearest and genetic matching: 'largest' or 'smallest' (by
+                propensity score), 'random', or 'data' (row order). The default
+                (None) is 'largest' when a propensity score is available
+                ('smallest' for estimand='ATC') and 'data' otherwise.
+            mahvars (str or list): Variables on which to compute a Mahalanobis
+                distance for matching, while the estimated distance measure is
+                kept for calipers and common support. Supported by nearest,
+                optimal, and full matching. In genetic matching these are the
+                variables of the weighted distance (balance is still optimized
+                on all covariates). In cardinality matching with a whole-number
+                `ratio`, the selected units are paired on them afterwards.
+                Must be covariates of the formula; cannot be combined with
+                distance='mahalanobis'. Default None.
             cutpoints (dict): For method='cem': per-covariate binning, mapping a
                 column name to either a number of bins or a list of cut points
                 (passed to ``pd.cut``). Numeric covariates not listed are binned
@@ -131,7 +183,9 @@ class MatchIt:
             tols (dict): For method='cardinality': covariate-specific balance
                 tolerances, as absolute mean differences. Default None.
             std_tols (float): For method='cardinality': standardized mean
-                difference tolerance for covariates not in `tols`. Default 0.1.
+                difference tolerance for covariates not in `tols`, using the
+                same standardization as ``summary()`` (treated SD for ATT,
+                control SD for ATC, pooled SD for ATE). Default 0.1.
             pop_size (int): Population size for genetic matching. Default 100.
             max_generations (int): Maximum generations for genetic matching.
                 Default 50.
@@ -221,6 +275,7 @@ class MatchIt:
                     link=self.link,
                     distance_options=self.distance_options,
                     random_state=self.random_state,
+                    estimand=self.estimand,
                 )
                 self.propensity_scores = ps_scores
 
@@ -251,7 +306,10 @@ class MatchIt:
         if self.matched_indices is None:
             raise ValueError("You must run .fit() before retrieving matches.")
 
-        if self.method in ("subclass", "full", "cardinality"):
+        # Cardinality matching only has pairs when mahvars requested pairing
+        if self.method in ("subclass", "full") or (
+            self.method == "cardinality" and not self.matched_indices
+        ):
             print(
                 f"Note: {self.method.capitalize()} matching does not produce pairwise matches."
             )
@@ -364,11 +422,26 @@ class MatchIt:
                     )
 
         if self.mahvars is not None:
+            if isinstance(self.mahvars, str):
+                self.mahvars = [self.mahvars]
             for col in self.mahvars:
                 if col not in self.data.columns:
                     raise ValueError(
                         f"Mahalanobis variable '{col}' not found in dataframe."
                     )
+
+        if self.ratio is not None and (
+            not isinstance(self.ratio, (int, np.integer)) or self.ratio < 1
+        ):
+            raise ValueError(
+                f"ratio must be a positive whole number, got {self.ratio}."
+            )
+
+        if self.m_order not in (None, "largest", "smallest", "random", "data"):
+            raise ValueError(
+                "m_order must be 'largest', 'smallest', 'random' or 'data', "
+                f"got '{self.m_order}'."
+            )
 
         # Validate estimand
         valid_estimands = {"ATT", "ATE", "ATC"}
@@ -384,45 +457,37 @@ class MatchIt:
                 "Use 'full', 'subclass', 'exact', 'cem', or 'cardinality' instead."
             )
 
-        if self.antiexact is not None and self.method not in ("nearest", "optimal"):
-            raise NotImplementedError(
-                f"antiexact is not supported for method='{self.method}'. "
-                "It is currently available for 'nearest' and 'optimal' matching."
-            )
-
         # Options a method cannot honour are rejected rather than silently ignored
-        if self.exact is not None and self.method not in ("nearest", "optimal", "full"):
-            raise NotImplementedError(
-                f"exact is not supported for method='{self.method}'. "
-                "It is currently available for 'nearest', 'optimal', and 'full' matching."
-            )
-
-        if self.caliper is not None and self.method not in (
-            "nearest",
-            "optimal",
-            "full",
-            "genetic",
-        ):
-            raise ValueError(
-                f"caliper is not used by method='{self.method}'. "
-                "It is available for 'nearest', 'optimal', 'full', and 'genetic' matching."
-            )
-
-        if self.replace and self.method not in ("nearest", "genetic"):
-            import warnings
-
-            warnings.warn(
-                f"replace=True has no effect for method='{self.method}'; "
-                "it is only used by 'nearest' and 'genetic' matching."
-            )
+        requested = {
+            "exact": self.exact is not None,
+            "antiexact": self.antiexact is not None,
+            "mahvars": self.mahvars is not None,
+            "caliper": self.caliper is not None,
+            "replace": bool(self.replace),
+            "m_order": self.m_order is not None,
+            "ratio": self.ratio not in (None, 1),
+            "cutpoints": self.cutpoints is not None,
+            "tols": self.tols is not None,
+            "min_controls_per_subclass": self.min_controls_per_subclass != 1,
+            "max_controls_per_subclass": self.max_controls_per_subclass is not None,
+        }
+        for option, is_set in requested.items():
+            supported = _OPTION_SUPPORT[option]
+            if is_set and self.method not in supported:
+                raise ValueError(
+                    f"{option} is not supported for method='{self.method}'. "
+                    f"It is available for: {', '.join(supported)}."
+                )
 
         if self.mahvars is not None:
-            if self.method not in ("nearest", "optimal", "full"):
-                raise NotImplementedError(
-                    f"mahvars is not supported for method='{self.method}'. "
-                    "It is currently available for 'nearest', 'optimal', and 'full' matching."
-                )
-            if isinstance(self.distance, str) and self.distance == "mahalanobis":
+            if self.method == "cardinality":
+                if self.ratio is None:
+                    raise ValueError(
+                        "mahvars with method='cardinality' pairs the selected units, "
+                        "which needs a fixed number of matches per unit: set ratio "
+                        "to a whole number (e.g. ratio=1)."
+                    )
+            elif isinstance(self.distance, str) and self.distance == "mahalanobis":
                 raise ValueError(
                     "mahvars cannot be combined with distance='mahalanobis': mahvars already "
                     "requests Mahalanobis matching, with the estimated distance kept for calipers."
@@ -486,10 +551,13 @@ class MatchIt:
         is_mahalanobis = (distance_method == "mahalanobis") or (
             self.mahvars is not None
         )
+        # Pair matching defaults to 1:1; for cardinality matching an unset
+        # ratio means profile matching
+        pair_ratio = 1 if self.ratio is None else self.ratio
 
         if self.method == "nearest":
             return NearestNeighborMatcher(
-                ratio=self.ratio,
+                ratio=pair_ratio,
                 replace=self.replace,
                 caliper=self.caliper,
                 m_order=self.m_order,
@@ -499,16 +567,14 @@ class MatchIt:
             )
         elif self.method == "optimal":
             return OptimalMatcher(
-                ratio=self.ratio,
+                ratio=pair_ratio,
                 caliper=self.caliper,
                 random_state=self.random_state,
                 mahalanobis=is_mahalanobis,
                 mahvars=self.mahvars,
             )
         elif self.method == "exact":
-            return ExactMatcher(
-                ratio=self.ratio, replace=self.replace, random_state=self.random_state
-            )
+            return ExactMatcher(random_state=self.random_state)
         elif self.method == "subclass":
             return SubclassMatcher(
                 n_subclasses=self.subclass, random_state=self.random_state
@@ -526,16 +592,22 @@ class MatchIt:
             )
         elif self.method == "genetic":
             return GeneticMatcher(
-                ratio=self.ratio,
+                ratio=pair_ratio,
                 replace=self.replace,
                 caliper=self.caliper,
                 pop_size=self.pop_size,
                 max_generations=self.max_generations,
                 random_state=self.random_state,
+                m_order=self.m_order,
+                mahvars=self.mahvars,
             )
         elif self.method == "cardinality":
             return CardinalityMatcher(
-                tols=self.tols, std_tols=self.std_tols, random_state=self.random_state
+                tols=self.tols,
+                std_tols=self.std_tols,
+                random_state=self.random_state,
+                ratio=self.ratio,
+                mahvars=self.mahvars,
             )
         else:
             raise NotImplementedError(f"Method {self.method} not supported yet.")
