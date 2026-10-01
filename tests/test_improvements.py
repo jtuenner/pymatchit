@@ -59,7 +59,9 @@ def test_link_probit_matches_on_probability(sim_data):
     m_lin = MatchIt(sim_data, method="nearest", link="linear.probit", random_state=1)
     m_lin.fit("treat ~ age + educ")
     # Linear predictor differs from the probability and is unbounded
-    assert not np.allclose(m_lin.distance_measure.values, m_lin.propensity_scores.values)
+    assert not np.allclose(
+        m_lin.distance_measure.values, m_lin.propensity_scores.values
+    )
 
 
 def test_link_logit_ml_method_matches_on_probability(sim_data):

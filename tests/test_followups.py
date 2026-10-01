@@ -35,7 +35,9 @@ def sim_data():
 # ==========================================
 # Options that cannot be honoured are rejected
 # ==========================================
-@pytest.mark.parametrize("method", ["genetic", "cardinality", "subclass", "cem", "exact"])
+@pytest.mark.parametrize(
+    "method", ["genetic", "cardinality", "subclass", "cem", "exact"]
+)
 def test_exact_unsupported_methods_raise(sim_data, method):
     m = MatchIt(sim_data, method=method, exact=["site"])
     with pytest.raises(NotImplementedError, match="exact"):
@@ -68,13 +70,21 @@ def test_probit_link_requires_glm(sim_data, distance, link):
 # ==========================================
 def test_genetic_covariate_caliper_respected(sim_data):
     m = MatchIt(
-        sim_data, method="genetic", caliper={"age": 2}, pop_size=10, max_generations=2, random_state=1
+        sim_data,
+        method="genetic",
+        caliper={"age": 2},
+        pop_size=10,
+        max_generations=2,
+        random_state=1,
     )
     m.fit(FORMULA)
     pairs = m.matches()
     assert len(pairs) > 0
     for row in pairs.itertuples():
-        gap = abs(sim_data.loc[row.treated_index, "age"] - sim_data.loc[row.control_index, "age"])
+        gap = abs(
+            sim_data.loc[row.treated_index, "age"]
+            - sim_data.loc[row.control_index, "age"]
+        )
         assert gap <= 2
 
 
