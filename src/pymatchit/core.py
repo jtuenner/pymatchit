@@ -481,7 +481,8 @@ class MatchIt:
                 self._ignored_options.add(option)
                 warnings.warn(
                     f"{option} is not used by method='{self.method}' and is ignored. "
-                    f"It is available for: {', '.join(supported)}."
+                    f"It is available for: {', '.join(supported)}.",
+                    stacklevel=3,
                 )
 
         if self.mahvars is not None and "mahvars" not in self._ignored_options:
