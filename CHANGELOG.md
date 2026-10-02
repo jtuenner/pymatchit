@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.1
+
+This release fixes two matching bugs. **Results change for full matching, and for nearest neighbor matching that combines `mahvars` with a caliper**; other methods are unaffected.
+
+### Changed results
+
+- **Full matching** is now optimal: it finds the subclasses with the smallest total distance between treated and control units, as R's `optmatch` does. A subclass is one treated unit with one or more controls, or one control with one or more treated units. Before, every unit of the smaller group was first paired with a unit of its own, which forced distant pairs when the groups overlap little: on the Lalonde data the standardized mean difference of `black` after matching was 1.02 and is now 0.02.
+- **`min_controls_per_subclass` and `max_controls_per_subclass`** are part of the optimization instead of being applied afterwards. Controls that `max_controls_per_subclass` leaves no room for stay unmatched, as few as possible. If there are too few controls to give every treated unit `min_controls_per_subclass` of its own, subclasses are merged, now with a warning.
+- **Nearest neighbor matching with `mahvars` and a caliper** applies the caliper to the propensity score. It was compared with the Mahalanobis distance instead, which left most units unmatched and allowed pairs that were far apart on the propensity score. Optimal, full and genetic matching were not affected.
+
+### Fixed
+
+- A caliper on the distance measure with `distance="mahalanobis"` (which estimates no propensity score), and invalid `min_controls_per_subclass` or `max_controls_per_subclass` values, raise an error that says what to change.
+
 ## 0.6.0
 
 This release aligns pymatchit with R MatchIt (checked against version 4.8.1) and fixes several cases where options were silently ignored. **Results change for some methods**; see "Changed results" below before upgrading an existing analysis.
