@@ -125,6 +125,39 @@ def _greedy_match(D: np.ndarray, order, ratio: int, replace: bool):
     return np.asarray(f_pos, dtype=int), np.asarray(o_pos, dtype=int)
 
 
+def _min_cost_edge_cover(D: np.ndarray, F: np.ndarray):
+    """
+    Minimum-cost edge cover of the bipartite graph with allowed pairs F and
+    costs D: the cheapest set of pairs that includes every row and column
+    unit that has an allowed pair. Returns the (row, column) positions of
+    the chosen pairs.
+
+    An edge cover is a matching plus, for every unit the matching leaves
+    out, that unit's cheapest pair. Its cost is the sum of all units'
+    cheapest pairs plus, for each matched pair, the saving
+    D[r, c] - cheapest[r] - cheapest[c]. The best matching is therefore an
+    assignment problem on the savings, in which pairs that save nothing stay
+    unmatched.
+    """
+    rows = np.flatnonzero(F.any(axis=1))
+    cols = np.flatnonzero(F.any(axis=0))
+    Dm = np.where(F, D, np.inf)[np.ix_(rows, cols)]
+    nearest_col = Dm.argmin(axis=1)
+    nearest_row = Dm.argmin(axis=0)
+
+    saving = Dm - Dm.min(axis=1)[:, None] - Dm.min(axis=0)[None, :]
+    saving = np.minimum(saving, 0.0)
+    r_ind, c_ind = linear_sum_assignment(saving)
+    paired = saving[r_ind, c_ind] < 0
+    r_pair, c_pair = r_ind[paired], c_ind[paired]
+
+    lone_rows = np.setdiff1d(np.arange(len(rows)), r_pair)
+    lone_cols = np.setdiff1d(np.arange(len(cols)), c_pair)
+    r_e = np.concatenate([r_pair, lone_rows, nearest_row[lone_cols]])
+    c_e = np.concatenate([c_pair, nearest_col[lone_rows], lone_cols])
+    return rows[r_e], cols[c_e]
+
+
 class BaseMatcher(ABC):
     """
     Abstract Base Class for all matching algorithms.
@@ -308,12 +341,13 @@ class NearestNeighborMatcher(BaseMatcher):
 
             metric = "mahalanobis"
             metric_params = {"VI": VI}
+            # The neighbor distances are Mahalanobis distances, so the caliper
+            # on the propensity score cannot be a cutoff on them: it is added
+            # below as a pair constraint, like the covariate calipers
             threshold = np.inf
 
-            if global_caliper is not None:
-                if distance_measure is None:
-                    raise ValueError("Caliper threshold requires 1D distance measure.")
-                threshold = global_caliper * dist_std
+            if global_caliper is not None and distance_measure is None:
+                raise ValueError("Caliper threshold requires 1D distance measure.")
         else:
             if distance_measure is None:
                 raise ValueError(
@@ -344,6 +378,17 @@ class NearestNeighborMatcher(BaseMatcher):
 
             for idx, limit in enumerate(cov_calipers.values()):
                 cov_thresholds_mapped[idx] = limit
+
+        if self.mahalanobis and global_caliper is not None:
+            ps_treated = distance_measure[treated_mask].values.reshape(-1, 1)
+            ps_control = distance_measure[control_mask].values.reshape(-1, 1)
+            if covs_treated_caliper is None:
+                covs_treated_caliper, covs_control_caliper = ps_treated, ps_control
+            else:
+                covs_treated_caliper = np.hstack([covs_treated_caliper, ps_treated])
+                covs_control_caliper = np.hstack([covs_control_caliper, ps_control])
+            ps_col = covs_treated_caliper.shape[1] - 1
+            cov_thresholds_mapped[ps_col] = global_caliper * dist_std
 
         anti_treated = anti_control = None
         if antiexact is not None:
@@ -952,17 +997,19 @@ class CEMMatcher(BaseMatcher):
 
 class FullMatcher(BaseMatcher):
     """
-    Implements Full Matching (subclassification with variable ratios).
-    Every matchable unit is placed into a subclass containing at least one
-    treated and one control unit.
+    Implements optimal Full Matching (Rosenbaum 1991; Hansen & Klopfer 2006),
+    the method of R's optmatch. Every matchable unit is placed into a
+    subclass of one treated unit and one or more controls, or one control
+    and one or more treated units, such that the total distance between the
+    treated and control units within subclasses is as small as possible.
+    Units with no within-caliper partner are left unmatched.
 
-    The algorithm is greedy but seeded by an optimal 1:1 assignment
-    (scipy's linear_sum_assignment): the majority group's remaining units
-    are then attached to the subclass of their nearest feasible opposite
-    unit. Units with no within-caliper partner are left unmatched, and
-    min/max controls per subclass are enforced. This approximates, but does
-    not guarantee, the provably optimal full matching of Hansen & Klopfer
-    (2006) used by R's optmatch.
+    Without limits on the subclass sizes this is a minimum-cost edge cover,
+    solved through an assignment problem (scipy's linear_sum_assignment).
+    With min/max controls per subclass the treated units get a limited
+    number of slots for controls, which is again an assignment problem.
+    Both are exact; R's optmatch solves the same problem to a tolerance, so
+    subclasses can differ between tied or near-tied solutions.
     """
 
     def __init__(
@@ -1164,160 +1211,184 @@ class FullMatcher(BaseMatcher):
 
     def _build_clusters(self, dist_matrix, feasible, n_t, n_c):
         """
-        Groups treated/control positions into subclasses.
-
-        Seeds subclasses with an optimal 1:1 assignment between the groups,
-        then attaches each remaining majority-group unit to the subclass of
-        its nearest feasible partner. Units with no feasible partner stay
-        unmatched. Returns a list of {'treated': [...], 'control': [...]}
-        with positional indices.
+        Groups treated/control positions into subclasses that minimize the
+        total treated-control distance. Returns a list of
+        {'treated': [...], 'control': [...]} with positional indices.
         """
-        import warnings
-
-        # Work in an orientation where rows are the smaller group, so the
-        # seeding assigns one column unit to every row unit
-        transpose = n_t > n_c
-        if transpose:
-            D = dist_matrix.T
-            F = feasible.T
-        else:
-            D = dist_matrix
-            F = feasible
-        n_rows, n_cols = D.shape
-
-        if F.any():
-            penalty = (D[F].max() + 1.0) * (n_rows + 1)
-        else:
+        if not feasible.any():
             warnings.warn(
                 "Full matching: no pair satisfies the caliper/antiexact "
                 "constraints; all units unmatched."
             )
             return []
 
-        cost = np.where(F, D, penalty)
-        row_ind, col_ind = linear_sum_assignment(cost)
+        # The best matching without size limits is also the best one with
+        # them whenever it happens to respect them
+        clusters = self._clusters_from_edges(
+            *_min_cost_edge_cover(dist_matrix, feasible), dist_matrix
+        )
+        if self._within_limits(clusters):
+            return clusters
 
-        clusters = []  # {'rows': [...], 'cols': [...]}
-        cluster_of_row = {}
-        cluster_of_col = {}
-        deferred_rows = []
+        edges = self._restricted_edges(dist_matrix, feasible, self.min_controls)
+        if edges is not None:
+            return self._clusters_from_edges(*edges, dist_matrix)
 
-        for r, c in zip(row_ind, col_ind):
-            if F[r, c]:
-                cluster_of_row[r] = len(clusters)
-                cluster_of_col[c] = len(clusters)
-                clusters.append({"rows": [r], "cols": [c]})
+        # One treated unit per subclass cannot be given min_controls controls
+        # (too few controls, or too few within the caliper). Fall back to the
+        # best matching without the minimum and merge the subclasses that
+        # are short of controls.
+        warnings.warn(
+            f"Full matching: min_controls_per_subclass={self.min_controls} cannot be "
+            "met with one treated unit per subclass (too few eligible controls). "
+            "Subclasses were merged to reach it, so some hold several treated and "
+            "several control units."
+        )
+        if self.max_controls is not None:
+            edges = self._restricted_edges(dist_matrix, feasible, 1)
+            clusters = self._clusters_from_edges(*edges, dist_matrix)
+        self._merge_for_min_controls(clusters, dist_matrix)
+        return clusters
+
+    def _within_limits(self, clusters):
+        upper = np.inf if self.max_controls is None else self.max_controls
+        return all(self.min_controls <= len(cl["control"]) <= upper for cl in clusters)
+
+    def _restricted_edges(self, D, F, min_controls):
+        """
+        Optimal full matching in which every treated unit is matched to
+        between `min_controls` and `self.max_controls` controls. With
+        `min_controls` > 1 every subclass has one treated unit; otherwise a
+        control can still be shared by several treated units. Controls that
+        the limits leave no room for stay unmatched, as few as possible.
+
+        Each case is an assignment problem between the controls and slots of
+        the treated units, so it is solved exactly. Returns the
+        (treated, control) positions of the matched pairs, or None when the
+        limits cannot be met.
+        """
+        rows = np.flatnonzero(F.any(axis=1))
+        cols = np.flatnonzero(F.any(axis=0))
+        ok = F[np.ix_(rows, cols)]
+        Dm = np.where(ok, D[np.ix_(rows, cols)], np.inf)
+        n_r, n_k = Dm.shape
+        # Costlier than any complete matching, so the assignment uses a
+        # forbidden pair only when it has no alternative
+        forbidden = (Dm[ok].max() + 1.0) * (n_r + n_k + 1)
+        max_controls = self.max_controls
+        if max_controls is not None and max_controls >= n_k:
+            max_controls = None
+
+        if min_controls <= 1:
+            if max_controls is None:
+                return _min_cost_edge_cover(D, F)
+            # A treated unit that takes on no control joins its nearest one.
+            # Taking on a first control instead costs the difference, and
+            # each further control up to max_controls its full distance.
+            nearest = Dm.argmin(axis=1)
+            first = Dm.T - Dm.min(axis=1)[None, :]
+            cost = np.hstack([first] + [Dm.T] * (max_controls - 1))
+            cost[~np.isfinite(cost)] = forbidden
+            c_ind, s_ind = linear_sum_assignment(cost)
+            used = cost[c_ind, s_ind] < forbidden
+            c_e, s_e = c_ind[used], s_ind[used]
+            joins = np.setdiff1d(np.arange(n_r), s_e[s_e < n_r])
+            t_e = np.concatenate([s_e % n_r, joins])
+            c_e = np.concatenate([c_e, nearest[joins]])
+        elif max_controls is None:
+            # Every treated unit must take min_controls controls; all other
+            # controls join their nearest treated unit. Taking a control
+            # away from its nearest treated unit costs the difference.
+            if n_k < min_controls * n_r:
+                return None
+            nearest = Dm.argmin(axis=0)
+            cost = np.repeat(Dm - Dm.min(axis=0)[None, :], min_controls, axis=0)
+            cost[~np.isfinite(cost)] = forbidden
+            s_ind, c_ind = linear_sum_assignment(cost)
+            if (cost[s_ind, c_ind] >= forbidden).any():
+                return None
+            joins = np.setdiff1d(np.arange(n_k), c_ind)
+            t_e = np.concatenate([s_ind // min_controls, nearest[joins]])
+            c_e = np.concatenate([c_ind, joins])
+        else:
+            # Every treated unit has max_controls slots, of which the first
+            # min_controls must be filled: filling one is rewarded more than
+            # any difference in distance
+            n_required = n_r * min_controls
+            allowed = np.tile(ok.T, (1, max_controls))
+            cost = np.where(allowed, np.tile(Dm.T, (1, max_controls)), forbidden)
+            cost[:, :n_required][allowed[:, :n_required]] -= forbidden
+            c_ind, s_ind = linear_sum_assignment(cost)
+            used = allowed[c_ind, s_ind]
+            if (used & (s_ind < n_required)).sum() < n_required:
+                return None
+            t_e, c_e = s_ind[used] % n_r, c_ind[used]
+
+        return rows[t_e], cols[c_e]
+
+    @staticmethod
+    def _clusters_from_edges(t_e, c_e, D):
+        """
+        Turns matched pairs into subclasses. Pairs whose treated and control
+        unit are both matched elsewhere too are dropped first (they only
+        occur between tied units, and leave every unit covered), so each
+        subclass is one unit together with its partners.
+        """
+        pairs = np.unique(np.column_stack([t_e, c_e]), axis=0)
+        t_e, c_e = pairs[:, 0], pairs[:, 1]
+        deg_t = np.bincount(t_e)
+        deg_c = np.bincount(c_e)
+        keep = np.ones(len(t_e), dtype=bool)
+        for e in np.argsort(-D[t_e, c_e], kind="stable"):
+            if deg_t[t_e[e]] > 1 and deg_c[c_e[e]] > 1:
+                keep[e] = False
+                deg_t[t_e[e]] -= 1
+                deg_c[c_e[e]] -= 1
+
+        clusters = {}
+        for t, c in zip(t_e[keep], c_e[keep]):
+            # The center of the subclass is the unit with several partners
+            center = ("c", c) if deg_c[c] > 1 else ("t", t)
+            cl = clusters.setdefault(center, {"treated": [], "control": []})
+            if center[0] == "t":
+                cl["treated"] = [int(t)]
+                cl["control"].append(int(c))
             else:
-                deferred_rows.append(r)
+                cl["control"] = [int(c)]
+                cl["treated"].append(int(t))
+        return list(clusters.values())
 
-        # In the transposed orientation rows are controls, so max_controls
-        # caps cluster row counts there; otherwise it caps column counts
-        max_rows = self.max_controls if transpose else None
-        max_cols = self.max_controls if not transpose else None
-
-        # Rows whose optimal partner was infeasible join the cluster of their
-        # nearest feasible column unit (if any); otherwise they stay unmatched
-        for r in deferred_rows:
-            feas_cols = [c for c in np.where(F[r])[0] if c in cluster_of_col]
-            if max_rows is not None:
-                feas_cols = [
-                    c
-                    for c in feas_cols
-                    if len(clusters[cluster_of_col[c]]["rows"]) < max_rows
-                ]
-            if not feas_cols:
-                continue
-            nearest = min(feas_cols, key=lambda c: D[r, c])
-            cid = cluster_of_col[nearest]
-            clusters[cid]["rows"].append(r)
-            cluster_of_row[r] = cid
-
-        # Attach remaining column units to their nearest feasible row's cluster.
-        # The unit must be feasible with every row unit already in that
-        # cluster, so the constraints hold for all pairs within a subclass.
-        remaining_cols = [c for c in range(n_cols) if c not in cluster_of_col]
-        for c in remaining_cols:
-            feas_rows = np.where(F[:, c])[0]
-            feas_rows = [r for r in feas_rows if r in cluster_of_row]
-            if not feas_rows:
-                continue
-            for r in sorted(feas_rows, key=lambda r: D[r, c]):
-                cl = clusters[cluster_of_row[r]]
-                if max_cols is not None and len(cl["cols"]) >= max_cols:
-                    continue
-                if not all(F[other, c] for other in cl["rows"]):
-                    continue
-                cl["cols"].append(c)
-                break
-
-        if self.min_controls > 1:
-            if transpose:
-                self._merge_for_min_rows(clusters, D, warnings)
-            else:
-                self._steal_for_min_cols(clusters, D, F, warnings)
-
-        # Translate back to treated/control orientation
-        result = []
-        for cl in clusters:
-            if transpose:
-                result.append({"treated": cl["cols"], "control": cl["rows"]})
-            else:
-                result.append({"treated": cl["rows"], "control": cl["cols"]})
-        return result
-
-    def _steal_for_min_cols(self, clusters, D, F, warnings):
-        """Move controls (cols) from clusters with surplus into clusters below
-        min_controls, choosing the closest feasible donor control."""
-        for cl in clusters:
-            while len(cl["cols"]) < self.min_controls:
-                donors = [
-                    (D[cl["rows"][0], c], other, c)
-                    for other in clusters
-                    if other is not cl and len(other["cols"]) > self.min_controls
-                    for c in other["cols"]
-                    if all(F[r, c] for r in cl["rows"])
-                ]
-                if not donors:
-                    warnings.warn(
-                        "Full matching: could not satisfy min_controls_per_subclass "
-                        "for every subclass."
-                    )
-                    return
-                _, donor, c = min(donors, key=lambda d: d[0])
-                donor["cols"].remove(c)
-                cl["cols"].append(c)
-
-    def _merge_for_min_rows(self, clusters, D, warnings):
-        """When controls are rows (more treated than controls), satisfy
-        min_controls by merging undersized clusters. Deficient clusters are
-        paired with their nearest deficient peer first, so merges don't
-        cascade into one giant subclass."""
+    def _merge_for_min_controls(self, clusters, D):
+        """Merges subclasses with fewer than min_controls controls. Each is
+        merged with its nearest deficient peer first, so merges don't cascade
+        into one giant subclass."""
 
         def cross_dist(a, b):
-            # Nearest control-treated pair across the two clusters
+            # Nearest treated-control pair across the two subclasses
             return min(
-                [D[r, c] for r in a["rows"] for c in b["cols"]]
-                + [D[r, c] for r in b["rows"] for c in a["cols"]]
+                D[np.ix_(a["treated"], b["control"])].min(),
+                D[np.ix_(b["treated"], a["control"])].min(),
             )
 
         while True:
             deficient = [
-                cl for cl in clusters if 0 < len(cl["rows"]) < self.min_controls
+                cl for cl in clusters if len(cl["control"]) < self.min_controls
             ]
-            if not deficient or len(clusters) < 2:
-                if deficient:
-                    warnings.warn(
-                        "Full matching: could not satisfy min_controls_per_subclass "
-                        "for every subclass."
-                    )
+            if not deficient:
+                return
+            if len(clusters) < 2:
+                warnings.warn(
+                    "Full matching: could not satisfy min_controls_per_subclass "
+                    "for every subclass."
+                )
                 return
             cl = deficient[0]
             partners = [o for o in deficient if o is not cl] or [
                 o for o in clusters if o is not cl
             ]
             host = min(partners, key=lambda o: cross_dist(cl, o))
-            host["rows"].extend(cl["rows"])
-            host["cols"].extend(cl["cols"])
+            host["treated"].extend(cl["treated"])
+            host["control"].extend(cl["control"])
             clusters.remove(cl)
 
 

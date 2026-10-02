@@ -192,9 +192,14 @@ class MatchIt:
             max_generations (int): Maximum generations for genetic matching.
                 Default 50.
             min_controls_per_subclass (int): Minimum number of control units per
-                subclass in full matching. Default 1.
+                subclass in full matching. The default, 1, sets no limit: a
+                subclass is one treated unit with one or more controls, or one
+                control with one or more treated units. With 2 or more, every
+                subclass has one treated unit. If there are too few controls
+                for that, subclasses are merged instead, with a warning.
             max_controls_per_subclass (int): Maximum number of control units per
-                subclass in full matching. Default None (no limit).
+                subclass in full matching. Controls the limit leaves no room
+                for stay unmatched. Default None (no limit).
             distance_options (dict): Options passed to the distance estimation
                 model (e.g. {'n_estimators': 500} for randomforest).
                 Default None.
@@ -483,6 +488,38 @@ class MatchIt:
                     f"{option} is not used by method='{self.method}' and is ignored. "
                     f"It is available for: {', '.join(supported)}.",
                     stacklevel=3,
+                )
+
+        distance_caliper = self.caliper is not None and (
+            not isinstance(self.caliper, dict) or "distance" in self.caliper
+        )
+        if (
+            distance_caliper
+            and "caliper" not in self._ignored_options
+            and isinstance(self.distance, str)
+            and self.distance == "mahalanobis"
+        ):
+            raise ValueError(
+                "A caliper on the distance measure needs a propensity score, but "
+                "distance='mahalanobis' estimates none. Use mahvars=[...] to match on "
+                "a Mahalanobis distance within a propensity score caliper, or give "
+                "covariate calipers as a dict (e.g. caliper={'age': 2})."
+            )
+
+        if self.method == "full":
+            low, high = self.min_controls_per_subclass, self.max_controls_per_subclass
+            limits = [("min_controls_per_subclass", low)]
+            if high is not None:
+                limits.append(("max_controls_per_subclass", high))
+            for name, value in limits:
+                if not isinstance(value, (int, np.integer)) or value < 1:
+                    raise ValueError(
+                        f"{name} must be a positive whole number, got {value}."
+                    )
+            if high is not None and high < low:
+                raise ValueError(
+                    f"max_controls_per_subclass ({high}) is smaller than "
+                    f"min_controls_per_subclass ({low})."
                 )
 
         if self.mahvars is not None and "mahvars" not in self._ignored_options:
